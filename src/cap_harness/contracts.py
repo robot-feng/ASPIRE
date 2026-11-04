@@ -16,6 +16,8 @@ JOINT_DIMENSIONS: Mapping[str, int] = MappingProxyType(
     {
         "behavior": 7,
         "libero": 7,
+        "open_rail_6dof": 6,
+        "open_rail_7dof": 7,
         "robosuite": 7,
         "yam_real": 6,
     }

@@ -1,0 +1,80 @@
+schema: cap-harness/open-rail-observation/1
+name: agibot_g1
+driver: open_rail
+robot_type: agibot_g1
+embodiment: open_rail_7dof
+runtime:
+  robot_module: cap_harness.open_rail.g1_body
+  config_factory: conf.robots_conf:get_agibot_g1_config
+
+# Confirmed from Open-RAIL RobotDds.arm_joint_names in order. Angles are radians.
+# These arm joints and grippers are the only command channels; the head/waist
+# values below are observation-only.
+arms:
+  left:
+    joints: [Joint1_l, Joint2_l, Joint3_l, Joint4_l, Joint5_l, Joint6_l, Joint7_l]
+    urdf_joints: [idx21_arm_l_joint1, idx22_arm_l_joint2, idx23_arm_l_joint3, idx24_arm_l_joint4, idx25_arm_l_joint5, idx26_arm_l_joint6, idx27_arm_l_joint7]
+    terminal_link: arm_left_link7
+  right:
+    joints: [Joint1_r, Joint2_r, Joint3_r, Joint4_r, Joint5_r, Joint6_r, Joint7_r]
+    urdf_joints: [idx61_arm_r_joint1, idx62_arm_r_joint2, idx63_arm_r_joint3, idx64_arm_r_joint4, idx65_arm_r_joint5, idx66_arm_r_joint6, idx67_arm_r_joint7]
+    terminal_link: arm_right_link7
+
+# Open-RAIL's committed G1 config and RobotDds.move_gripper use [0=open, 1=closed].
+# Hardware jaw geometry, force/current limits, and normalized feedback calibration
+# are not specified here; do not treat the normalized command as a TCP model.
+gripper:
+  control: gripper
+  rail_command_open: 0.0
+  rail_command_closed: 1.0
+  sdk_feedback_divisor: 120.0
+  sdk_feedback_position_range: null
+  motion_profile_verified: false
+  gripper_geometry: null
+  tcp_transform: null
+
+camera:
+  public_camera_key: head
+  rgb_channel: cam.head
+  depth_channel: cam.head_depth
+  sdk_rgb_order: BGR
+  open_rail_rgb_order: RGB
+  reference_camera_config: /home/agi/app/conf/deploy/camera_copilot/rs_camera_conf_53.json
+  reference_rgb_resolution: [1280, 720]
+  reference_depth_resolution: [640, 360]
+  observed_rgb_resolution: [1280, 800]
+  depth_encoding: RS2_FORMAT_Z16
+  depth_scale_m_per_unit: null
+  depth_registered_to_rgb: null
+  depth_to_rgb_calibration: null
+  maximum_rgb_depth_skew_ms: null
+  color_intrinsics_file: /data/parameters/head_intrinsic_params.json
+  camera_extrinsics_file: /data/parameters/head_extrinsic_params.json
+  camera_extrinsics_semantics: null
+
+state:
+  dimension: 20
+  layout:
+    left_arm_rad: [0, 7]
+    right_arm_rad: [7, 14]
+    left_gripper_normalized: [14, 15]
+    right_gripper_normalized: [15, 16]
+    head_yaw_pitch_rad: [16, 18]
+    waist_pitch_rad_lift_m: [18, 20]
+
+calibration:
+  camera_intrinsics: /data/parameters/head_intrinsic_params.json
+  camera_extrinsics: /data/parameters/head_extrinsic_params.json
+  depth_scale_m_per_unit: null
+  depth_registered_to_rgb: null
+  depth_to_rgb_calibration: null
+  base_frame: null
+  base_pose: null
+  arm_tcp_transforms: null
+
+kinematics:
+  candidate_urdf_file: /home/agi/app/bin/motion-control/share/robot_model/urdf/G1/model.urdf
+  candidate_dh_file: /data/parameters/dh_parameters.yaml
+  urdf_runtime_match_verified: false
+  base_frame: null
+  base_pose: null

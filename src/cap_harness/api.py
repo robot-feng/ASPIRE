@@ -216,6 +216,25 @@ class CapApi:
             )
         return observation
 
+    def get_planning_scene(
+        self,
+        observation: Observation | None = None,
+        *,
+        target_point_cloud: PointCloud | None = None,
+        voxel_size_m: float = 0.01,
+    ) -> PlanningScene:
+        """Build collision geometry from one public RGB-D observation.
+
+        Pass ``observation`` to keep perception, grasp generation, and motion
+        planning bound to the same camera snapshot. Omitting it preserves the
+        existing behavior of acquiring a fresh observation for this call.
+        """
+        return self._planning_scene(
+            observation=observation,
+            target_point_cloud=target_point_cloud,
+            voxel_size_m=voxel_size_m,
+        )
+
     def get_robot_state(self) -> RobotState:
         state = self._adapter.get_robot_state()
         if state.embodiment != self._embodiment:
@@ -311,6 +330,53 @@ class CapApi:
         backend: str = "contact-graspnet",
         max_candidates: int = 5,
     ) -> GraspSet:
+        if self._grasp_providers.get(backend) is None:
+            return GraspSet(
+                ok=False,
+                error=ApiError(
+                    code=ErrorCode.UNSUPPORTED,
+                    message=f"grasp backend {backend!r} is not configured",
+                    details={"backend": backend},
+                ),
+            )
+        return self._generate_grasps_from_observation(
+            camera_name,
+            mask,
+            self.get_observation(camera_name),
+            backend=backend,
+            max_candidates=max_candidates,
+            include_snapshot_metadata=False,
+        )
+
+    def generate_grasps_from_observation(
+        self,
+        camera_name: str,
+        mask: Segmentation | np.ndarray,
+        observation: Observation,
+        *,
+        backend: str = "contact-graspnet",
+        max_candidates: int = 5,
+    ) -> GraspSet:
+        """Generate grasps from a caller-supplied RGB-D snapshot."""
+        return self._generate_grasps_from_observation(
+            camera_name,
+            mask,
+            observation,
+            backend=backend,
+            max_candidates=max_candidates,
+            include_snapshot_metadata=True,
+        )
+
+    def _generate_grasps_from_observation(
+        self,
+        camera_name: str,
+        mask: Segmentation | np.ndarray,
+        observation: Observation,
+        *,
+        backend: str,
+        max_candidates: int,
+        include_snapshot_metadata: bool,
+    ) -> GraspSet:
         provider = self._grasp_providers.get(backend)
         if provider is None:
             return GraspSet(
@@ -321,7 +387,14 @@ class CapApi:
                     details={"backend": backend},
                 ),
             )
-        observation = self.get_observation(camera_name)
+        if camera_name not in observation.cameras:
+            return GraspSet(
+                ok=False,
+                error=ApiError(
+                    ErrorCode.INVALID_REQUEST,
+                    f"observation has no camera {camera_name!r}",
+                ),
+            )
         camera = observation.cameras[camera_name]
         if isinstance(mask, Segmentation):
             segmentation = mask
@@ -361,9 +434,103 @@ class CapApi:
         # Caller-chosen, because a caller that filters candidates itself -- by
         # approach direction, say -- needs more of them than one that takes the
         # first. Five was fine as a fixed ceiling only while nobody filtered.
-        return provider.generate_grasps(
+        result = provider.generate_grasps(
             point_cloud,
             scene_point_cloud=scene_point_cloud,
+            max_candidates=max_candidates,
+        )
+        if not include_snapshot_metadata:
+            return result
+        return replace(
+            result,
+            diagnostics={
+                **result.diagnostics,
+                "camera_name": camera_name,
+                "camera_frame": camera.frame,
+                "camera_timestamp_s": camera.timestamp_s,
+                "observation_timestamp_s": observation.timestamp_s,
+                "snapshot_id": self._snapshot_id(camera.frame, camera.timestamp_s),
+            },
+        )
+
+    def generate_grasps_for_localization(
+        self,
+        localization: LocalizationResult,
+        observation: Observation,
+        *,
+        camera_name: str | None = None,
+        max_camera_state_skew_s: float,
+        backend: str = "graspgenx",
+        max_candidates: int = 5,
+    ) -> GraspSet:
+        """Generate grasps only when localization belongs to this camera snapshot."""
+        if (
+            not isinstance(localization, LocalizationResult)
+            or not localization.ok
+            or localization.segmentation is None
+            or localization.point_cloud is None
+        ):
+            return GraspSet(
+                ok=False,
+                error=ApiError(ErrorCode.INVALID_REQUEST, "a successful localization is required"),
+            )
+        if not isinstance(observation, Observation):
+            return GraspSet(
+                ok=False,
+                error=ApiError(ErrorCode.INVALID_REQUEST, "observation must be an Observation"),
+            )
+        try:
+            max_skew = float(max_camera_state_skew_s)
+        except (TypeError, ValueError):
+            max_skew = float("nan")
+        if isinstance(max_camera_state_skew_s, bool) or not np.isfinite(max_skew) or max_skew < 0:
+            return GraspSet(
+                ok=False,
+                error=ApiError(
+                    ErrorCode.INVALID_REQUEST, "max_camera_state_skew_s must be finite and nonnegative"
+                ),
+            )
+        name = camera_name or localization.diagnostics.get("camera_name") or self.default_camera
+        if not isinstance(name, str) or name not in observation.cameras:
+            return GraspSet(
+                ok=False,
+                error=ApiError(ErrorCode.INVALID_REQUEST, "localization camera is unavailable"),
+            )
+        camera = observation.cameras[name]
+        expected_id = self._snapshot_id(camera.frame, camera.timestamp_s)
+        if (
+            expected_id is None
+            or localization.diagnostics.get("snapshot_id") != expected_id
+            or localization.diagnostics.get("camera_name") != name
+            or localization.diagnostics.get("segmentation_source") != "provider"
+            or localization.diagnostics.get("instance_count") != 1
+            or localization.diagnostics.get("robot_state_timestamp_s")
+            != observation.robot_state.timestamp_s
+            or localization.point_cloud.frame != observation.robot_state.base_frame
+        ):
+            return GraspSet(
+                ok=False,
+                error=ApiError(
+                    ErrorCode.INVALID_REQUEST,
+                    "localization is not bound to this camera snapshot",
+                    details={"reason": "snapshot_mismatch"},
+                ),
+            )
+        state_timestamp = observation.robot_state.timestamp_s
+        if state_timestamp is None or abs(camera.timestamp_s - state_timestamp) > max_skew:
+            return GraspSet(
+                ok=False,
+                error=ApiError(
+                    ErrorCode.INVALID_REQUEST,
+                    "camera and robot state timestamps are missing or too far apart",
+                    details={"reason": "camera_state_skew"},
+                ),
+            )
+        return self.generate_grasps_from_observation(
+            name,
+            localization.segmentation,
+            observation,
+            backend=backend,
             max_candidates=max_candidates,
         )
 
@@ -507,6 +674,8 @@ class CapApi:
         arm: str = "primary",
         strategy: MotionStrategy | None = None,
         target_point_cloud: PointCloud | None = None,
+        planning_scene: PlanningScene | None = None,
+        robot_state: RobotState | None = None,
     ) -> PlanResult:
         arm = self._resolve_arm(arm)
         if strategy is None:
@@ -521,11 +690,33 @@ class CapApi:
                 ErrorCode.INVALID_REQUEST,
                 "target_point_cloud must be a PointCloud or None",
             )
-        state = self.get_robot_state()
+        if planning_scene is not None and not isinstance(planning_scene, PlanningScene):
+            return self._plan_failure(
+                ErrorCode.INVALID_REQUEST,
+                "planning_scene must be a PlanningScene or None",
+            )
+        if robot_state is not None and not isinstance(robot_state, RobotState):
+            return self._plan_failure(
+                ErrorCode.INVALID_REQUEST,
+                "robot_state must be a RobotState or None",
+            )
+        state = self.get_robot_state() if robot_state is None else robot_state
+        if state.embodiment != self._embodiment:
+            return self._plan_failure(
+                ErrorCode.INVALID_REQUEST,
+                f"robot state embodiment {state.embodiment!r} does not match "
+                f"adapter embodiment {self._embodiment!r}",
+            )
         if target_point_cloud is not None and target_point_cloud.frame != state.base_frame:
             return self._plan_failure(
                 ErrorCode.INVALID_REQUEST,
                 f"target point cloud is in frame {target_point_cloud.frame!r}, "
+                f"expected {state.base_frame!r}",
+            )
+        if planning_scene is not None and planning_scene.frame != state.base_frame:
+            return self._plan_failure(
+                ErrorCode.INVALID_REQUEST,
+                f"planning scene is in frame {planning_scene.frame!r}, "
                 f"expected {state.base_frame!r}",
             )
         if arm not in state.joint_positions:
@@ -582,6 +773,7 @@ class CapApi:
                     scene=self._planning_scene_request(
                         arm,
                         target_point_cloud=target_point_cloud,
+                        planning_scene=planning_scene,
                     ),
                     context=self._planning_context(planning_state),
                     **timing_options,
@@ -637,7 +829,15 @@ class CapApi:
                     joint_goal,
                     arm=arm,
                     gripper_position=self._commanded_gripper_position(state, arm),
-                    scene=self._planning_scene(target_point_cloud=target_point_cloud),
+                    scene=(
+                        self._planning_scene(target_point_cloud=target_point_cloud)
+                        if planning_scene is None
+                        else self._planning_scene_request(
+                            arm,
+                            target_point_cloud=target_point_cloud,
+                            planning_scene=planning_scene,
+                        )
+                    ),
                     context=self._planning_context(state),
                     **timing_options,
                 )
@@ -1153,10 +1353,115 @@ class CapApi:
     ) -> LocalizationResult:
         observation = self.get_observation()
         name = camera_name or self.default_camera
-        segmentation_set = self._stage("segment_text", self._segment_text, name, query, observation)
-        if not segmentation_set.ok:
-            return LocalizationResult(ok=False, error=segmentation_set.error)
-        segmentation = segmentation_set.segmentations[0]
+        if name not in observation.cameras:
+            segmentations = self._stage(
+                "segment_text", self._segment_text, name, query, observation
+            )
+            return LocalizationResult(ok=False, error=segmentations.error)
+        result = self.localize_object_from_observation(
+            query,
+            observation,
+            camera_name=camera_name,
+            target_frame=target_frame,
+        )
+        return replace(result, diagnostics={}) if result.ok else result
+
+    def localize_object_from_observation(
+        self,
+        query: str,
+        observation: Observation,
+        *,
+        camera_name: str | None = None,
+        target_frame: str | None = None,
+        segmentation: Segmentation | None = None,
+        require_single_instance: bool = False,
+        min_valid_depth_points: int | None = None,
+        min_valid_depth_fraction: float | None = None,
+    ) -> LocalizationResult:
+        """Localize an object using only the caller-supplied camera snapshot.
+
+        Set ``require_single_instance`` to reject ambiguous text detections.
+        An explicitly supplied segmentation already identifies the instance.
+        """
+        if type(require_single_instance) is not bool:
+            return LocalizationResult(
+                ok=False,
+                error=ApiError(ErrorCode.INVALID_REQUEST, "require_single_instance must be a bool"),
+            )
+        if min_valid_depth_points is not None and (
+            isinstance(min_valid_depth_points, bool)
+            or not isinstance(min_valid_depth_points, int | np.integer)
+            or min_valid_depth_points < 1
+        ):
+            return LocalizationResult(
+                ok=False,
+                error=ApiError(ErrorCode.INVALID_REQUEST, "min_valid_depth_points must be positive"),
+            )
+        if min_valid_depth_fraction is not None:
+            try:
+                fraction = float(min_valid_depth_fraction)
+            except (TypeError, ValueError):
+                fraction = float("nan")
+            if (
+                isinstance(min_valid_depth_fraction, bool)
+                or not np.isfinite(fraction)
+                or not 0.0 <= fraction <= 1.0
+            ):
+                return LocalizationResult(
+                    ok=False,
+                    error=ApiError(
+                        ErrorCode.INVALID_REQUEST,
+                        "min_valid_depth_fraction must be in [0, 1]",
+                    ),
+                )
+        name = camera_name or self.default_camera
+        if name not in observation.cameras:
+            return LocalizationResult(
+                ok=False,
+                error=ApiError(ErrorCode.NOT_FOUND, f"observation has no camera {name!r}"),
+            )
+        segmentation_from_provider = segmentation is None
+        instance_count = None
+        if segmentation_from_provider:
+            segmentation_set = self._stage(
+                "segment_text", self._segment_text, name, query, observation
+            )
+            if not segmentation_set.ok:
+                return LocalizationResult(ok=False, error=segmentation_set.error)
+            instance_count = len(segmentation_set.segmentations)
+            reported_count = segmentation_set.diagnostics.get("total_instances", instance_count)
+            if (
+                isinstance(reported_count, bool)
+                or not isinstance(reported_count, int)
+                or reported_count < instance_count
+            ):
+                return LocalizationResult(
+                    ok=False,
+                    error=ApiError(ErrorCode.PERCEPTION_FAILED, "invalid instance count from provider"),
+                )
+            instance_count = reported_count
+            if require_single_instance and instance_count != 1:
+                return LocalizationResult(
+                    ok=False,
+                    error=ApiError(
+                        ErrorCode.PERCEPTION_FAILED,
+                        "text query matched multiple instances; select one before planning",
+                        details={"query": query, "instance_count": instance_count},
+                    ),
+                )
+            segmentation = segmentation_set.segmentations[0]
+        elif segmentation.camera_name not in {name, observation.cameras[name].frame}:
+            return LocalizationResult(
+                ok=False,
+                error=ApiError(
+                    ErrorCode.INVALID_REQUEST,
+                    "segmentation camera does not match the selected observation",
+                    details={
+                        "camera_name": name,
+                        "segmentation_camera": segmentation.camera_name,
+                    },
+                ),
+            )
         if target_frame is None:
             target_frame = observation.robot_state.base_frame
         try:
@@ -1168,6 +1473,28 @@ class CapApi:
                 target_frame=target_frame,
                 observation=observation,
             )
+            mask_count = int(np.count_nonzero(segmentation.mask))
+            valid_count = len(point_cloud.points)
+            valid_fraction = valid_count / mask_count if mask_count else 0.0
+            if (
+                min_valid_depth_points is not None and valid_count < min_valid_depth_points
+            ) or (
+                min_valid_depth_fraction is not None and valid_fraction < fraction
+            ):
+                return LocalizationResult(
+                    ok=False,
+                    segmentation=segmentation,
+                    point_cloud=point_cloud,
+                    error=ApiError(
+                        ErrorCode.POINT_CLOUD_FAILED,
+                        "target mask has insufficient valid depth",
+                        details={
+                            "mask_pixels": mask_count,
+                            "valid_depth_points": valid_count,
+                            "valid_depth_fraction": valid_fraction,
+                        },
+                    ),
+                )
             geometry = self._stage("estimate_geometry", self.estimate_geometry, point_cloud)
         except ValueError as exc:
             return LocalizationResult(
@@ -1183,7 +1510,23 @@ class CapApi:
             geometry=geometry,
             segmentation=segmentation,
             point_cloud=point_cloud,
+            diagnostics={
+                "camera_name": name,
+                "camera_frame": observation.cameras[name].frame,
+                "camera_timestamp_s": observation.cameras[name].timestamp_s,
+                "observation_timestamp_s": observation.timestamp_s,
+                "robot_state_timestamp_s": observation.robot_state.timestamp_s,
+                "snapshot_id": self._snapshot_id(
+                    observation.cameras[name].frame, observation.cameras[name].timestamp_s
+                ),
+                "segmentation_source": "provider" if segmentation_from_provider else "supplied",
+                "instance_count": instance_count,
+            },
         )
+
+    @staticmethod
+    def _snapshot_id(frame: str, timestamp_s: float | None) -> str | None:
+        return None if timestamp_s is None else f"{frame}@{timestamp_s:.9f}"
 
     def select_grasp(
         self,
@@ -1310,6 +1653,9 @@ class CapApi:
         *,
         arm: str = "primary",
         strategy: MotionStrategy | None = None,
+        target_point_cloud: PointCloud | None = None,
+        planning_scene: PlanningScene | None = None,
+        robot_state: RobotState | None = None,
     ) -> ExecutionResult:
         """Move to a Pose or an absolute position/frame plus quaternion or rpy_deg."""
         arm = self._resolve_arm(arm)
@@ -1327,12 +1673,19 @@ class CapApi:
                 steps_executed=0,
                 error=ApiError(ErrorCode.INVALID_REQUEST, str(exc)),
             )
+        options: dict[str, object] = {"arm": arm, "strategy": strategy}
+        for name, value in (
+            ("target_point_cloud", target_point_cloud),
+            ("planning_scene", planning_scene),
+            ("robot_state", robot_state),
+        ):
+            if value is not None:
+                options[name] = value
         plan = self._stage(
             "plan_motion",
             self.plan_motion,
             target_pose,
-            arm=arm,
-            strategy=strategy,
+            **options,
         )
         if not plan.ok or plan.trajectory is None:
             return ExecutionResult(ok=False, steps_executed=0, error=plan.error)
@@ -1564,6 +1917,20 @@ class CapApi:
                 capability=capability,
                 public=True,
             )
+        if str(self._adapter.embodiment).startswith("open_rail_"):
+            for name, capability in (
+                ("get_planning_scene", "planning"),
+                ("generate_grasps_for_localization", "grasping"),
+                ("generate_grasps_from_observation", "grasping"),
+                ("localize_object_from_observation", "perception"),
+            ):
+                registry.register(
+                    getattr(self, name),
+                    name=name,
+                    layer="shared_atomic",
+                    capability=capability,
+                    public=True,
+                )
         extensions = (
             ("get_task_metadata", "metadata"),
             ("get_controller_metadata", "metadata"),
@@ -1603,9 +1970,11 @@ class CapApi:
         *,
         voxel_size_m: float = 0.01,
         target_point_cloud: PointCloud | None = None,
+        observation: Observation | None = None,
     ) -> PlanningScene:
         """Fuse public RGB-D observations without reading native simulator geometry."""
-        observation = self.get_observation()
+        supplied_observation = observation is not None
+        observation = self.get_observation() if observation is None else observation
         frame = observation.robot_state.base_frame
         if target_point_cloud is not None and target_point_cloud.frame != frame:
             raise ValueError(
@@ -1646,8 +2015,23 @@ class CapApi:
         return PlanningScene(
             point_cloud=PointCloud(points=downsampled, frame=frame),
             voxel_size_m=voxel_size_m,
-            timestamp_s=observation.timestamp_s,
+            timestamp_s=(
+                self._observation_timestamp(observation)
+                if supplied_observation
+                else observation.timestamp_s
+            ),
         )
+
+    @staticmethod
+    def _observation_timestamp(observation: Observation) -> float | None:
+        if observation.timestamp_s is not None:
+            return observation.timestamp_s
+        timestamps = [
+            camera.timestamp_s
+            for camera in observation.cameras.values()
+            if camera.timestamp_s is not None
+        ]
+        return min(timestamps) if timestamps else None
 
     @staticmethod
     def _exclude_target_from_scene(
@@ -1708,9 +2092,29 @@ class CapApi:
         arm: str,
         *,
         target_point_cloud: PointCloud | None = None,
+        planning_scene: PlanningScene | None = None,
     ) -> PlanningScene:
         """Let an adapter express the public scene in a selected planner base."""
-        scene = self._planning_scene(target_point_cloud=target_point_cloud)
+        scene = (
+            self._planning_scene(target_point_cloud=target_point_cloud)
+            if planning_scene is None
+            else planning_scene
+        )
+        if planning_scene is not None and target_point_cloud is not None:
+            if target_point_cloud.frame != scene.frame:
+                raise ValueError(
+                    f"target point cloud is in frame {target_point_cloud.frame!r}, "
+                    f"expected planning scene frame {scene.frame!r}"
+                )
+            points = self._exclude_target_from_scene(
+                scene.point_cloud.points,
+                target_point_cloud.points,
+            )
+            scene = PlanningScene(
+                point_cloud=PointCloud(points=points, frame=scene.frame),
+                voxel_size_m=scene.voxel_size_m,
+                timestamp_s=scene.timestamp_s,
+            )
         transform = getattr(self._adapter, "planning_scene_request", None)
         if not callable(transform):
             return scene

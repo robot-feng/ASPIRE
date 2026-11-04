@@ -13,3 +13,4 @@ artifacts/
 outputs/
 validation-output/
 .behavior-appdata/
+third_party/models/

@@ -16,3 +16,12 @@
 [submodule "third_party/BEHAVIOR-1K"]
 	path = third_party/BEHAVIOR-1K
 	url = https://github.com/StanfordVL/BEHAVIOR-1K.git
+[submodule "third_party/open-rail"]
+	path = third_party/open-rail
+	url = https://github.com/CMCC-TAO/open-rail.git
+[submodule "third_party/WeVisOne-VL"]
+	path = third_party/WeVisOne-VL
+	url = https://github.com/Tencent/WeVisOne-VL.git
+[submodule "third_party/GraspGenX"]
+	path = third_party/GraspGenX
+	url = https://github.com/NVlabs/GraspGenX.git
