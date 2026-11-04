@@ -18,6 +18,7 @@ import uvicorn
 
 from cap_harness.providers.service_runtime import install_service_runtime
 
+from .compat_457 import Transformers457SnapshotView
 from .model_path import resolve_model_source, verify_snapshot
 from .wire import SEGMENT_PATH
 
@@ -25,6 +26,7 @@ LOGGER = logging.getLogger(__name__)
 app = FastAPI(title="cap-harness WeVisOne-VL provider")
 install_service_runtime(app)
 _ENGINE: Any | None = None
+_COMPAT_SNAPSHOT_VIEW: Transformers457SnapshotView | None = None
 _INFERENCE_LOCK = asyncio.Semaphore(1)
 _MAX_INSTANCES = 8
 
@@ -141,11 +143,16 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--backend", choices=("transformers", "vllm"), default="transformers")
+    parser.add_argument(
+        "--compat-transformers-457",
+        action="store_true",
+        help="adapt the supported local Qwen3-VL snapshot schema in a disposable view",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8117)
     args = parser.parse_args()
 
-    global _ENGINE
+    global _COMPAT_SNAPSHOT_VIEW, _ENGINE
     model_source = resolve_model_source(args.model)
     source_path = os.path.expanduser(model_source)
     if os.path.isabs(source_path):
@@ -156,6 +163,13 @@ def main() -> None:
         # missing from the selected local directory.
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    if args.compat_transformers_457:
+        if args.backend != "transformers":
+            raise ValueError("--compat-transformers-457 requires --backend transformers")
+        if not os.path.isabs(source_path) or not os.path.isdir(source_path):
+            raise ValueError("--compat-transformers-457 requires a local model snapshot directory")
+        _COMPAT_SNAPSHOT_VIEW = Transformers457SnapshotView(source_path)
+        model_source = str(_COMPAT_SNAPSHOT_VIEW.path)
     # Hugging Face libraries may cache offline settings at import time.
     from wevisone_vl.engine import WeVisOneVL
 

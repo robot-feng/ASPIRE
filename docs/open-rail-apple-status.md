@@ -37,17 +37,24 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   `/data/parameters/fisheye_camera_info.json` identifies `cam7` as the same
   D457's `head_depth`; a separate camera configuration enables that channel.
   The vendor scene manifests also start HAL and motion control, so changing
-  scenes is not treated as a camera-only operation.
+  scenes is not treated as a camera-only operation. Static inspection shows
+  that the launcher's `RESTART_SCENE` path invokes `RestartAll`, including
+  `motion_control` in the `develop` scene; no restart was performed.
 - WeVisOne-VL and GraspGen-X files occupy 4.6 GB and 1.6 GB respectively under
   ignored `third_party/models/` paths. File presence and size do not establish
   that either model can load or run on this Jetson.
 - The WeVisOne local snapshot has 626 tensors; its weight and decoder hashes
-  match the download metadata. The installed NVIDIA Torch 2.4 prerelease and
-  the available Transformers versions have not yet loaded its processor and
-  model together. In an isolated CPU-only probe, temporary in-process adapters
-  for the prerelease version check and the changed `torch.library.custom_op`
-  call signature allowed `Qwen3VLProcessor` to preprocess a synthetic image.
-  Neither adapter is deployed; model weights and inference remain untested.
+  match the download metadata. An isolated CPU-only probe using the installed
+  NVIDIA Torch 2.4 prerelease and Transformers 4.57 loaded the weights and
+  generated an instance box and finite 128×128 matte for a synthetic image.
+  It used a temporary snapshot view with tokenizer and RoPE configuration
+  translated for that version; the source files were unchanged. The probe
+  took about 60 seconds and peaked at approximately 14.23 GiB RSS. A separate
+  offline probe on a historical RGB frame located the visible apple, while a
+  saved frame without a visible apple returned no instance. Inputs, responses,
+  masks, overlays and versions are indexed in
+  `artifacts/open_rail/observe/wevisone/apple_cpu_20261104T115426Z/manifest.json`.
+  These two samples do not establish accuracy or the current scene state.
 - A candidate G1 OmniPicker URDF and meshes are present at
   `/data/dreamlabs/g1_demo/tcp_setup/arms/g1-omnipicker.urdf` (SHA-256
   `8e2721f121557dc41e961105f505fe8da1a949cb8321af9d1ef5903eb52f4d35`).

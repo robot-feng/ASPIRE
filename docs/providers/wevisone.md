@@ -41,7 +41,57 @@ PYTHONPATH=third_party/WeVisOne-VL:src \
 
 The official WeVisOne source pins PyTorch 2.11.0 and Transformers 5.12.1. This
 target currently has JetPack R36.3 with NVIDIA PyTorch 2.4.0a0; Transformers
-4.57.0 fails to parse the release's tokenizer configuration, while 5.12.1
-rejects the installed PyTorch prerelease version. Keep the service in a separate
-runtime and do not launch it in the Open-RAIL environment until a compatible
-Jetson runtime is available.
+4.57.0 cannot read the release's tokenizer list or `rope_parameters` config
+directly, while 5.12.1 rejects the installed PyTorch prerelease version. For
+this specific local release snapshot, an explicit compatibility view adapts
+only those two JSON files in a temporary directory and symlinks all other
+snapshot files. The helper rejects unknown token lists and RoPE variants; it
+does not edit the original checkpoint. This view can be requested with
+`--compat-transformers-457`:
+
+```bash
+WEVISONE_MODEL_PATH=third_party/models/wevisone-vl-2b \
+PYTHONPATH=third_party/WeVisOne-VL:src \
+  python -m cap_harness.providers.wevisone.service \
+    --port 8117 --device cpu --compat-transformers-457
+```
+
+This opt-in path was exercised with the installed Transformers 4.57.0 and
+NVIDIA PyTorch 2.4.0a0, with CUDA disabled. A 128×128 synthetic red-square
+image produced one parsed box and a finite 128×128 probability matte in about
+60 seconds; peak RSS was about 14.23 GiB. This is a CPU compatibility smoke
+check, not a quality or field-validation result. The model's generation call
+also reports that `temperature`, `top_p`, and `top_k` may be ignored when
+sampling is disabled. GPU execution, live camera frames, depth association,
+and manipulation remain unverified.
+
+To reproduce the CPU synthetic probe from the ASPIRE checkout:
+
+```bash
+source /data/agi-miniconda3/etc/profile.d/conda.sh
+conda activate /data/conda-envs/open-rail
+export LD_LIBRARY_PATH="/data/conda-envs/open-rail/usr/lib/aarch64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export PYTHONPATH="$PWD/src:$PWD/third_party/WeVisOne-VL"
+export CUDA_VISIBLE_DEVICES=-1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
+timeout --signal=TERM --kill-after=5s 180s python - <<'PY'
+import pathlib
+from PIL import Image, ImageDraw
+import torch
+from cap_harness.providers.wevisone.compat_457 import Transformers457SnapshotView
+from wevisone_vl import WeVisOneVL
+
+assert not torch.cuda.is_available()
+view = Transformers457SnapshotView("third_party/models/wevisone-vl-2b")
+try:
+    engine = WeVisOneVL(str(view.path), device="cpu", backend="transformers",
+                        dtype="float32", min_pixels=128**2, max_pixels=512**2)
+    image = Image.new("RGB", (128, 128), (35, 35, 35))
+    ImageDraw.Draw(image).rectangle((34, 32, 94, 96), fill=(220, 20, 20))
+    result = engine.predict(image, task="segmentation", query="red square",
+                            decode_matting=True, max_new_tokens=24)
+    print(result.response, result.boxes, [mask.shape for mask in result.masks])
+finally:
+    view.cleanup()
+PY
+```

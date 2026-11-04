@@ -6,21 +6,30 @@ import argparse
 import asyncio
 from collections.abc import Mapping
 import functools
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
 import tempfile
 from typing import Any, Literal
+import xml.etree.ElementTree as ET
 
 from fastapi import FastAPI, HTTPException
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 import uvicorn
 
 from cap_harness.contracts import JOINT_DIMENSIONS
 from cap_harness.providers.service_runtime import install_service_runtime
 
 from ..wire import decode_numpy, encode_numpy
+from .attachment import (
+    AttachedObjectGeometry,
+    carve_attached_object_points,
+    merge_attachment_into_kinematics,
+    pose7_to_matrix,
+)
 from .dual import build_dual_panda_config
 from .wire import IK_PATH, PLAN_PATH, PLAN_SYNCHRONIZED_PATH
 
@@ -31,6 +40,7 @@ install_service_runtime(app)
 _PLANNERS: dict[tuple[str, float | None, float | None], Any] = {}
 _IK_SOLVERS: dict[str, Any] = {}
 _SEGMENTATION_KINEMATICS: dict[str, Any] = {}
+_ATTACHED_CONFIG_PATHS: dict[str, str] = {}
 _SEGMENTATION_TOLERANCE_M = 0.02
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +73,30 @@ class Target(BaseModel):
     joint_positions: list[float] | None = None
 
 
+class AttachedObjectRequest(BaseModel):
+    object_link_name: str
+    attachment_joint_name: str
+    parent_link_name: str
+    parent_to_object: list[float]
+    collision_spheres: list[list[float]]
+    contact_link_names: list[str]
+
+    def to_geometry(self) -> AttachedObjectGeometry:
+        return AttachedObjectGeometry(
+            object_link_name=self.object_link_name,
+            attachment_joint_name=self.attachment_joint_name,
+            parent_link_name=self.parent_link_name,
+            parent_to_object=tuple(self.parent_to_object),
+            collision_spheres=tuple(tuple(sphere) for sphere in self.collision_spheres),
+            contact_link_names=tuple(self.contact_link_names),
+        )
+
+    @model_validator(mode="after")
+    def validate_geometry(self) -> AttachedObjectRequest:
+        self.to_geometry()
+        return self
+
+
 class BaseRequest(BaseModel):
     base_frame: str
     model: Literal["panda", "dual_panda", "yam_real"]
@@ -74,6 +108,7 @@ class BaseRequest(BaseModel):
     voxel_size_m: float = 0.01
     interpolation_dt_s: float | None = None
     maximum_trajectory_dt_s: float | None = None
+    attached_object: AttachedObjectRequest | None = None
 
 
 class IkRequest(BaseRequest):
@@ -93,11 +128,13 @@ class SynchronizedPlanRequest(BaseRequest):
 class PlanResponse(BaseModel):
     joint_positions_base64: str
     dt_s: float
+    attachment_diagnostics: dict[str, Any] | None = None
 
 
 class SynchronizedPlanResponse(BaseModel):
     joint_positions_base64: dict[str, str]
     dt_s: float
+    attachment_diagnostics: dict[str, Any] | None = None
 
 
 @functools.lru_cache(maxsize=1)
@@ -265,28 +302,171 @@ def _segmentation_kinematics(request: BaseRequest) -> Any | None:
 
 def _robot_config(request: BaseRequest) -> str:
     if request.model == "panda":
-        return os.environ.get("CAP_HARNESS_CUROBO_PANDA_CONFIG", "franka.yml")
-    if request.model == "yam_real":
-        return _yam_real_robot_config()
-    value = os.environ.get("CAP_HARNESS_CUROBO_DUAL_CONFIG")
-    if value and Path(value).is_file():
-        return value
-    try:
-        import curobo
+        robot_config = os.environ.get("CAP_HARNESS_CUROBO_PANDA_CONFIG", "franka.yml")
+    elif request.model == "yam_real":
+        robot_config = _yam_real_robot_config()
+    else:
+        value = os.environ.get("CAP_HARNESS_CUROBO_DUAL_CONFIG")
+        if value and Path(value).is_file():
+            robot_config = value
+        else:
+            try:
+                import curobo
 
-        curobo_root = Path(curobo.__file__).resolve().parents[1]
-        secondary = np.asarray(request.base_transforms["secondary"], dtype=np.float64)
-        return str(
-            build_dual_panda_config(
-                curobo_root,
-                secondary,
-                Path(os.environ.get("CAP_HARNESS_CUROBO_MODEL_CACHE", "/tmp/curobo-models")),
-            )
+                curobo_root = Path(curobo.__file__).resolve().parents[1]
+                secondary = np.asarray(request.base_transforms["secondary"], dtype=np.float64)
+                robot_config = str(
+                    build_dual_panda_config(
+                        curobo_root,
+                        secondary,
+                        Path(
+                            os.environ.get(
+                                "CAP_HARNESS_CUROBO_MODEL_CACHE", "/tmp/curobo-models"
+                            )
+                        ),
+                    )
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503, detail=f"could not build dual-Panda model: {exc}"
+                ) from exc
+
+    if request.attached_object is None:
+        return robot_config
+    if _collision_disabled(request.model):
+        raise HTTPException(
+            status_code=400,
+            detail="attached-object planning requires collision checking to be enabled",
         )
+    if request.scene_points_base64 is None:
+        raise HTTPException(
+            status_code=400,
+            detail="attached-object planning requires an observed scene point cloud",
+        )
+    try:
+        return _attached_robot_config(robot_config, request.attached_object.to_geometry())
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
-            status_code=503, detail=f"could not build dual-Panda model: {exc}"
+            status_code=400, detail=f"invalid attached-object robot config: {exc}"
         ) from exc
+
+
+def _attachment_diagnostics(request: BaseRequest) -> dict[str, Any] | None:
+    if request.attached_object is None:
+        return None
+    return {
+        "object_link": request.attached_object.object_link_name,
+        "collision_model": "caller_supplied_spheres",
+        "geometry_verified": False,
+        "sphere_coverage_verified": False,
+        "scene_carve_may_remove_support_points": True,
+        "contact_links_ignored_for_self_collision": list(
+            request.attached_object.contact_link_names
+        ),
+    }
+
+
+def _attached_robot_config(
+    robot_config: str, attachment: AttachedObjectGeometry
+) -> str:
+    """Create a stable temporary cuRobo config carrying an explicit fixed object link."""
+    import yaml
+
+    source = Path(robot_config)
+    if not source.is_file():
+        from curobo.content import get_robot_configs_path
+
+        source = Path(get_robot_configs_path()) / robot_config
+    if not source.is_file():
+        raise FileNotFoundError(f"cuRobo robot config not found: {source}")
+
+    source_bytes = source.read_bytes()
+    payload = json.dumps(attachment.to_payload(), sort_keys=True, separators=(",", ":"))
+    document = yaml.safe_load(source_bytes)
+    if not isinstance(document, dict):
+        raise ValueError("cuRobo config root must be a mapping")
+    robot_cfg = document.get("robot_cfg", document)
+    if not isinstance(robot_cfg, dict) or not isinstance(robot_cfg.get("kinematics"), dict):
+        raise ValueError("cuRobo config must contain a kinematics mapping")
+    urdf_path = _validate_attachment_links(robot_cfg["kinematics"], attachment)
+    digest = hashlib.sha256(
+        source_bytes + urdf_path.read_bytes() + payload.encode("utf-8")
+    ).hexdigest()
+    cached = _ATTACHED_CONFIG_PATHS.get(digest)
+    if cached is not None and Path(cached).is_file():
+        return cached
+
+    robot_cfg["kinematics"] = merge_attachment_into_kinematics(
+        robot_cfg["kinematics"], attachment
+    )
+
+    output_dir = Path(tempfile.gettempdir()) / "cap_harness_curobo_attached"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"{digest}.yml"
+    if not output.is_file():
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yml", prefix=f"{digest}.", dir=output_dir,
+            encoding="utf-8", delete=False,
+        ) as handle:
+            yaml.safe_dump(document, handle, sort_keys=False)
+            temporary = Path(handle.name)
+        os.replace(temporary, output)
+    _ATTACHED_CONFIG_PATHS[digest] = str(output)
+    return str(output)
+
+
+def _validate_attachment_links(
+    kinematics: Mapping[str, Any], attachment: AttachedObjectGeometry
+) -> Path:
+    """Check requested parent/contact links exist and reject URDF closure loops."""
+    urdf_path = kinematics.get("urdf_path")
+    if not isinstance(urdf_path, str) or not urdf_path:
+        raise ValueError("attachment requires a robot URDF path")
+    urdf = Path(urdf_path)
+    if not urdf.is_absolute():
+        from curobo.content import get_assets_path
+
+        urdf = Path(get_assets_path()) / urdf
+    if not urdf.is_file():
+        raise FileNotFoundError(f"robot URDF not found: {urdf}")
+    root = ET.parse(urdf).getroot()
+    loop_joints = root.findall("loop_joint")
+    if loop_joints:
+        names = [joint.attrib.get("name", "<unnamed>") for joint in loop_joints]
+        raise ValueError(
+            "cuRobo request attachments require a tree URDF; unsupported loop_joint tags: "
+            f"{names}"
+        )
+    links = {element.attrib.get("name") for element in root.findall("link")}
+    required = {attachment.parent_link_name, *attachment.contact_link_names}
+    missing = sorted(required - links)
+    if missing:
+        raise ValueError(f"attachment links are absent from robot URDF: {missing}")
+    parent_by_child: dict[str, str] = {}
+    for joint in root.findall("joint"):
+        child = joint.find("child")
+        parent = joint.find("parent")
+        if child is not None and parent is not None:
+            child_link = child.attrib.get("link")
+            parent_link = parent.attrib.get("link")
+            if child_link is not None and parent_link is not None:
+                parent_by_child[child_link] = parent_link
+    for contact in attachment.contact_link_names:
+        ancestor = contact
+        while ancestor != attachment.parent_link_name and ancestor in parent_by_child:
+            ancestor = parent_by_child[ancestor]
+        if ancestor != attachment.parent_link_name:
+            raise ValueError(
+                f"contact link {contact!r} is outside the attached gripper subtree "
+                f"rooted at {attachment.parent_link_name!r}"
+            )
+    if attachment.object_link_name in links:
+        raise ValueError(
+            f"attachment object link already exists in robot URDF: {attachment.object_link_name}"
+        )
+    return urdf
 
 
 def _filter_robot_points(
@@ -447,20 +627,82 @@ def _drop_distant_points(
     return points[np.linalg.norm(points, axis=1) <= max_range_m]
 
 
+def _planner_attachment_sphere_indices(
+    planner: Any, object_link_name: str, sphere_count: int
+) -> np.ndarray:
+    """Find attached-object sphere slots in the planner model or refuse the carve."""
+    kinematics = getattr(planner, "kinematics", planner)
+    params = getattr(getattr(kinematics, "config", None), "kinematics_config", None)
+    get_indices = getattr(params, "get_sphere_index_from_link_name", None)
+    if not callable(get_indices):
+        raise HTTPException(
+            status_code=500,
+            detail="planner model cannot identify attached-object collision spheres",
+        )
+    try:
+        indices = np.asarray(
+            get_indices(object_link_name).detach().cpu(), dtype=np.int64
+        ).reshape(-1)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"planner model has no attached-object sphere mapping: {exc}",
+        ) from exc
+    if len(indices) == 0:
+        raise HTTPException(
+            status_code=500,
+            detail="planner model has no attached-object collision spheres",
+        )
+    if np.any(indices < 0) or np.any(indices >= sphere_count):
+        raise HTTPException(
+            status_code=500,
+            detail="planner attached-object sphere indices are outside the FK sphere array",
+        )
+    return indices
+
+
 def _carve_robot_points(request: BaseRequest, robot: Any, points: np.ndarray) -> np.ndarray:
     """Remove robot pixels using the embodiment's segmentation geometry."""
     segmentation = _segmentation_kinematics(request)
     source = segmentation if segmentation is not None else robot
-    spheres = np.asarray(
-        source.compute_kinematics(_state(request, source)).robot_spheres.detach().cpu(),
-        dtype=np.float64,
-    ).reshape(-1, 4)
+    state = source.compute_kinematics(_state(request, source))
+    spheres = np.asarray(state.robot_spheres.detach().cpu(), dtype=np.float64).reshape(-1, 4)
+    if request.attached_object is not None and segmentation is None:
+        object_indices = _planner_attachment_sphere_indices(
+            robot,
+            request.attached_object.object_link_name,
+            len(spheres),
+        )
+        spheres = np.delete(spheres, object_indices, axis=0)
     margin = (
         _SEGMENTATION_TOLERANCE_M
         if segmentation is not None
         else max(float(request.voxel_size_m), _ROBOT_SEGMENTATION_DISTANCE_M)
     )
-    return _filter_robot_points(points, spheres, padding_m=margin)
+    filtered = _filter_robot_points(points, spheres, padding_m=margin)
+    if request.attached_object is not None:
+        try:
+            current = _state(request, robot)
+            poses = robot.compute_kinematics(current).tool_poses.to_dict()
+            pose = poses[request.attached_object.object_link_name]
+            position = np.asarray(pose.position.detach().cpu(), dtype=np.float64).reshape(-1, 3)[0]
+            quaternion = np.asarray(
+                pose.quaternion.detach().cpu(), dtype=np.float64
+            ).reshape(-1, 4)[0]
+            object_pose = pose7_to_matrix([*position, *quaternion], name="object FK pose")
+            attachment = request.attached_object.to_geometry()
+            filtered = carve_attached_object_points(
+                filtered,
+                object_pose,
+                attachment.collision_spheres,
+                padding_m=float(request.voxel_size_m),
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"attached-object scene carve failed: {exc}",
+            ) from exc
+    return filtered
 
 
 def _scene(request: BaseRequest, robot: Any | None = None) -> Any | None:
@@ -837,6 +1079,20 @@ def _configuration_constraint_detail(planner: Any, state: Any) -> dict[str, obje
         return {"diagnostic_error": f"{type(exc).__name__}: {exc}"}
 
 
+def _goal_tool_frames(request: BaseRequest, planner: Any) -> list[str]:
+    """Return goal frames, omitting a held object's FK-only frame."""
+    ordered = list(getattr(planner, "tool_frames", ()))
+    if request.attached_object is not None:
+        # The attached object moves with its parent link; it is an FK/collision
+        # frame, not a second stationary goal constraint.
+        ordered = [
+            frame
+            for frame in ordered
+            if frame != request.attached_object.object_link_name
+        ]
+    return ordered
+
+
 def _ordered_goal_poses(
     request: BaseRequest,
     targets: Mapping[str, Target],
@@ -845,7 +1101,7 @@ def _ordered_goal_poses(
 ) -> tuple[dict[str, Any], list[str]]:
     """Complete partial bimanual pose goals with the inactive live tool pose."""
     poses = {request.end_effector_links[arm]: _pose(target) for arm, target in targets.items()}
-    ordered = list(getattr(planner, "tool_frames", ()))
+    ordered = _goal_tool_frames(request, planner)
     missing = [name for name in ordered if name not in poses]
     if missing:
         current_poses = planner.compute_kinematics(current).tool_poses.to_dict()
@@ -1061,7 +1317,11 @@ def _plan(request: PlanRequest) -> PlanResponse:
         result, planner=planner, current=current, goal_state=goal_state
     )
     indices = _requested_indices(request, request.arm, names)
-    return PlanResponse(joint_positions_base64=encode_numpy(positions[:, indices]), dt_s=dt)
+    return PlanResponse(
+        joint_positions_base64=encode_numpy(positions[:, indices]),
+        dt_s=dt,
+        attachment_diagnostics=_attachment_diagnostics(request),
+    )
 
 
 def _plan_synchronized(request: SynchronizedPlanRequest) -> SynchronizedPlanResponse:
@@ -1081,7 +1341,11 @@ def _plan_synchronized(request: SynchronizedPlanRequest) -> SynchronizedPlanResp
         if not set(requested) <= set(names):
             raise HTTPException(status_code=500, detail=f"planned trajectory omitted {arm}")
         output[arm] = encode_numpy(positions[:, [names.index(name) for name in requested]])
-    return SynchronizedPlanResponse(joint_positions_base64=output, dt_s=dt)
+    return SynchronizedPlanResponse(
+        joint_positions_base64=output,
+        dt_s=dt,
+        attachment_diagnostics=_attachment_diagnostics(request),
+    )
 
 
 async def _worker(function: Any, request: Any) -> Any:
@@ -1102,12 +1366,16 @@ async def solve_ik(request: IkRequest) -> dict[str, object]:
     return await _run_request(_solve_ik, request)
 
 
-@app.post(PLAN_PATH, response_model=PlanResponse)
+@app.post(PLAN_PATH, response_model=PlanResponse, response_model_exclude_none=True)
 async def plan(request: PlanRequest) -> PlanResponse:
     return await _run_request(_plan, request)
 
 
-@app.post(PLAN_SYNCHRONIZED_PATH, response_model=SynchronizedPlanResponse)
+@app.post(
+    PLAN_SYNCHRONIZED_PATH,
+    response_model=SynchronizedPlanResponse,
+    response_model_exclude_none=True,
+)
 async def plan_synchronized(request: SynchronizedPlanRequest) -> SynchronizedPlanResponse:
     return await _run_request(_plan_synchronized, request)
 

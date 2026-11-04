@@ -25,6 +25,7 @@ from cap_harness.geometry import quaternion_wxyz_to_matrix
 
 from ..http import HttpProviderClient, ProviderHttpError
 from ..wire import decode_numpy, encode_numpy
+from .attachment import AttachedObjectGeometry
 from .wire import IK_PATH, PLAN_PATH, PLAN_SYNCHRONIZED_PATH
 
 DEFAULT_CUROBO_URL = "http://127.0.0.1:8118"
@@ -56,6 +57,21 @@ def _typed_service_failure(exc: ProviderHttpError, code: ErrorCode) -> ApiError:
             message = detail
     details["http_error_code"] = error.code.value
     return ApiError(code=code, message=message, details=details, recoverable=error.recoverable)
+
+
+def _attachment_diagnostics(attachment: AttachedObjectGeometry | None) -> dict[str, object]:
+    if attachment is None:
+        return {}
+    return {
+        "attached_object": attachment.object_link_name,
+        "attached_object_geometry_verified": False,
+        "attached_object_geometry_source": "caller_supplied_collision_spheres",
+        "attached_object_sphere_coverage_verified": False,
+        "attached_object_scene_carve_may_remove_support_points": True,
+        "attached_object_contact_links_ignored_for_self_collision": list(
+            attachment.contact_link_names
+        ),
+    }
 
 
 PANDA_EEF_TO_HAND_OFFSET_M = np.array([0.0, 0.0, -0.1], dtype=np.float64)
@@ -179,6 +195,7 @@ class CuRoboProvider:
         time_dilation_factor: float | None = None,
         interpolation_dt_s: float | None = None,
         maximum_trajectory_dt_s: float | None = None,
+        attached_object: AttachedObjectGeometry | None = None,
     ) -> PlanResult:
         return self._plan(
             robot_state,
@@ -190,6 +207,7 @@ class CuRoboProvider:
             time_dilation_factor=time_dilation_factor,
             interpolation_dt_s=interpolation_dt_s,
             maximum_trajectory_dt_s=maximum_trajectory_dt_s,
+            attached_object=attached_object,
         )
 
     def plan_to_joints(
@@ -204,6 +222,7 @@ class CuRoboProvider:
         time_dilation_factor: float | None = None,
         interpolation_dt_s: float | None = None,
         maximum_trajectory_dt_s: float | None = None,
+        attached_object: AttachedObjectGeometry | None = None,
     ) -> PlanResult:
         return self._plan(
             robot_state,
@@ -215,6 +234,7 @@ class CuRoboProvider:
             time_dilation_factor=time_dilation_factor,
             interpolation_dt_s=interpolation_dt_s,
             maximum_trajectory_dt_s=maximum_trajectory_dt_s,
+            attached_object=attached_object,
         )
 
     def _plan(
@@ -229,13 +249,24 @@ class CuRoboProvider:
         time_dilation_factor: float | None,
         interpolation_dt_s: float | None,
         maximum_trajectory_dt_s: float | None,
+        attached_object: AttachedObjectGeometry | None,
     ) -> PlanResult:
         error = self._validate_request(robot_state, target, arm)
         if error is not None:
             return PlanResult(ok=False, error=error)
+        if (
+            attached_object is not None
+            and gripper_position is not None
+            and not np.isclose(gripper_position, robot_state.gripper_positions[arm], atol=1e-6)
+        ):
+            return self._plan_failure(
+                "attached-object planning cannot change gripper position"
+            )
         if scene is None or context is None:
             return self._plan_failure("cuRobo planning requires a scene and robot context")
-        payload = self._base_payload(robot_state, context, scene)
+        payload = self._base_payload(
+            robot_state, context, scene, attached_object=attached_object
+        )
         payload.update({"arm": arm, "target": self._encode_target(target, robot_state.embodiment)})
         dilation = self._time_dilation(time_dilation_factor)
         if interpolation_dt_s is not None:
@@ -280,19 +311,21 @@ class CuRoboProvider:
                 "cuRobo returned an invalid motion plan",
                 {"provider": "curobo", "error": str(exc)},
             )
+        diagnostics: dict[str, object] = {
+            "provider": "curobo",
+            "planning_mode": planning_mode,
+            "source_dt_s": source_dt,
+            "time_dilation_factor": dilation,
+            "time_dilation": dilation,
+            "interpolation_dt_s": interpolation_dt_s,
+            "maximum_trajectory_dt_s": maximum_trajectory_dt_s,
+            "scene_points": len(scene.point_cloud.points),
+        }
+        diagnostics.update(_attachment_diagnostics(attached_object))
         return PlanResult(
             ok=True,
             trajectory=trajectory,
-            diagnostics={
-                "provider": "curobo",
-                "planning_mode": planning_mode,
-                "source_dt_s": source_dt,
-                "time_dilation_factor": dilation,
-                "time_dilation": dilation,
-                "interpolation_dt_s": interpolation_dt_s,
-                "maximum_trajectory_dt_s": maximum_trajectory_dt_s,
-                "scene_points": len(scene.point_cloud.points),
-            },
+            diagnostics=diagnostics,
         )
 
     def plan_synchronized_motion(
@@ -306,7 +339,16 @@ class CuRoboProvider:
         time_dilation_factor: float | None = None,
         interpolation_dt_s: float | None = None,
         maximum_trajectory_dt_s: float | None = None,
+        attached_object: AttachedObjectGeometry | None = None,
     ) -> SynchronizedPlanResult:
+        if attached_object is not None and gripper_positions is not None and any(
+            arm not in robot_state.gripper_positions
+            or not np.isclose(value, robot_state.gripper_positions[arm], atol=1e-6)
+            for arm, value in gripper_positions.items()
+        ):
+            return self._sync_failure(
+                "attached-object planning cannot change gripper positions"
+            )
         if scene is None or context is None:
             return self._sync_failure("cuRobo planning requires a scene and robot context")
         if set(targets) != set(robot_state.arms):
@@ -322,7 +364,9 @@ class CuRoboProvider:
                     "cuRobo V2 synchronized planning currently requires pose targets",
                     code=ErrorCode.UNSUPPORTED,
                 )
-        payload = self._base_payload(robot_state, context, scene)
+        payload = self._base_payload(
+            robot_state, context, scene, attached_object=attached_object
+        )
         payload["targets"] = {
             arm: self._encode_target(target, robot_state.embodiment)
             for arm, target in targets.items()
@@ -376,17 +420,19 @@ class CuRoboProvider:
                 "cuRobo returned an invalid synchronized plan",
                 {"provider": "curobo", "error": str(exc)},
             )
+        diagnostics: dict[str, object] = {
+            "provider": "curobo",
+            "source_dt_s": source_dt,
+            "time_dilation_factor": dilation,
+            "time_dilation": dilation,
+            "interpolation_dt_s": interpolation_dt_s,
+            "maximum_trajectory_dt_s": maximum_trajectory_dt_s,
+        }
+        diagnostics.update(_attachment_diagnostics(attached_object))
         return SynchronizedPlanResult(
             ok=True,
             trajectory=trajectory,
-            diagnostics={
-                "provider": "curobo",
-                "source_dt_s": source_dt,
-                "time_dilation_factor": dilation,
-                "time_dilation": dilation,
-                "interpolation_dt_s": interpolation_dt_s,
-                "maximum_trajectory_dt_s": maximum_trajectory_dt_s,
-            },
+            diagnostics=diagnostics,
         )
 
     def _base_payload(
@@ -394,6 +440,8 @@ class CuRoboProvider:
         state: RobotState,
         context: RobotPlanningContext,
         scene: PlanningScene | None = None,
+        *,
+        attached_object: AttachedObjectGeometry | None = None,
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "base_frame": state.base_frame,
@@ -410,6 +458,8 @@ class CuRoboProvider:
                 scene.point_cloud.points.astype(np.float32)
             )
             payload["voxel_size_m"] = scene.voxel_size_m
+        if attached_object is not None:
+            payload["attached_object"] = attached_object.to_payload()
         return payload
 
     @staticmethod

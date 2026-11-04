@@ -11,6 +11,7 @@ import pytest
 from cap_harness.contracts import CameraObservation, Pose
 from cap_harness.errors import ErrorCode
 from cap_harness.providers.wevisone import WeVisOneProvider
+from cap_harness.providers.wevisone.compat_457 import Transformers457SnapshotView
 from cap_harness.providers.wevisone.model_path import (
     REQUIRED_MODEL_FILES,
     resolve_model_source,
@@ -247,3 +248,106 @@ def test_offline_snapshot_verifier_checks_safetensors_tensor_ranges(tmp_path) ->
     (cache / "model.incomplete").touch()
     with pytest.raises(ValueError, match="incomplete downloads"):
         verify_snapshot(root)
+
+
+def _write_transformers_457_snapshot(root) -> None:
+    root.mkdir()
+    (root / "model.safetensors").write_bytes(b"weights stay untouched")
+    (root / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (root / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "extra_special_tokens": [
+                    "<|im_start|>",
+                    "<|im_end|>",
+                    "<|vision_start|>",
+                    "<|vision_end|>",
+                    "<|vision_pad|>",
+                    "<|image_pad|>",
+                    "<|video_pad|>",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3_vl",
+                "text_config": {
+                    "model_type": "qwen3_vl_text",
+                    "head_dim": 128,
+                    "rope_parameters": {
+                        "rope_type": "default",
+                        "rope_theta": 5_000_000,
+                        "mrope_section": [24, 20, 20],
+                        "mrope_interleaved": True,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_transformers_457_view_adapts_only_supported_configs_and_preserves_source(tmp_path) -> None:
+    source = tmp_path / "snapshot"
+    _write_transformers_457_snapshot(source)
+    original_config = (source / "config.json").read_bytes()
+    original_tokenizer = (source / "tokenizer_config.json").read_bytes()
+    original_weights = (source / "model.safetensors").read_bytes()
+
+    view = Transformers457SnapshotView(source)
+    try:
+        adapted_config = json.loads((view.path / "config.json").read_text(encoding="utf-8"))
+        adapted_tokenizer = json.loads(
+            (view.path / "tokenizer_config.json").read_text(encoding="utf-8")
+        )
+        assert adapted_config["text_config"]["rope_theta"] == 5_000_000
+        assert adapted_config["text_config"]["rope_scaling"] == {
+            "rope_type": "default",
+            "mrope_section": [24, 20, 20],
+            "mrope_interleaved": True,
+        }
+        assert "rope_parameters" not in adapted_config["text_config"]
+        assert adapted_tokenizer["extra_special_tokens"] == {
+            "im_start_token": "<|im_start|>",
+            "im_end_token": "<|im_end|>",
+            "vision_start_token": "<|vision_start|>",
+            "vision_end_token": "<|vision_end|>",
+            "vision_pad_token": "<|vision_pad|>",
+            "image_token": "<|image_pad|>",
+            "video_token": "<|video_pad|>",
+        }
+        assert (view.path / "model.safetensors").is_symlink()
+        assert (source / "config.json").read_bytes() == original_config
+        assert (source / "tokenizer_config.json").read_bytes() == original_tokenizer
+        assert (source / "model.safetensors").read_bytes() == original_weights
+    finally:
+        view.cleanup()
+
+
+@pytest.mark.parametrize(
+    "config_mutation,token_mutation,error",
+    [
+        (lambda config: config["text_config"]["rope_parameters"].update(rope_type="linear"), None, "only default"),
+        (lambda config: config["text_config"]["rope_parameters"].update(mrope_interleaved=False), None, "interleaved"),
+        (None, lambda tokens: tokens["extra_special_tokens"].reverse(), "unsupported WeVisOne tokenizer"),
+    ],
+)
+def test_transformers_457_view_rejects_unknown_tokenizer_or_rope_variants(
+    tmp_path, config_mutation, token_mutation, error
+) -> None:
+    source = tmp_path / "snapshot"
+    _write_transformers_457_snapshot(source)
+    if config_mutation is not None:
+        config = json.loads((source / "config.json").read_text(encoding="utf-8"))
+        config_mutation(config)
+        (source / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    if token_mutation is not None:
+        tokenizer = json.loads((source / "tokenizer_config.json").read_text(encoding="utf-8"))
+        token_mutation(tokenizer)
+        (source / "tokenizer_config.json").write_text(json.dumps(tokenizer), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=error):
+        Transformers457SnapshotView(source)
