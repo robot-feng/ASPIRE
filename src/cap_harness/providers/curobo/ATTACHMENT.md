@@ -6,8 +6,8 @@ request, robot config, and scene paths remain unchanged. When present, the
 service writes/caches a robot config with an explicit fixed object link and
 collision spheres, gets its base pose from current-state FK, removes that
 object's sphere-covered points from the world point cloud, and plans with both
-the robot and object collision spheres. No embodiment or task API state
-contract is registered or enabled by this change.
+the robot and object collision spheres. Attachment state is not stored in the
+robot state; callers must provide it again for every held-object plan.
 
 The caller must provide all of the following from calibration or a separately
 validated model:
@@ -53,8 +53,10 @@ links. A `collision_aware` result here means cuRobo checked the supplied sphere
 model and filtered scene; it is not a claim of physical safety. It does not
 replace target segmentation during approach. The optional request is available
 through `CuRoboProvider.plan_to_pose`, `plan_to_joints`, and
-`plan_synchronized_motion`; the higher-level `CapApi` and `RobotState` contract
-do not yet expose attachment state.
+`plan_synchronized_motion`. `CapApi.plan_motion` and `move_to_pose` accept an
+explicit descriptor or mapping for a single-arm plan, reject planners without
+attachment support, and reject simultaneous target-AABB exclusion. The
+synchronized `CapApi` methods and `RobotState` do not carry attachment state.
 
 ## G1 candidate boundary
 

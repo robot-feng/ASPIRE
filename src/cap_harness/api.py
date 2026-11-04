@@ -676,7 +676,13 @@ class CapApi:
         target_point_cloud: PointCloud | None = None,
         planning_scene: PlanningScene | None = None,
         robot_state: RobotState | None = None,
+        attached_object: object | None = None,
     ) -> PlanResult:
+        """Plan one arm; an attachment requires a supporting collision planner.
+
+        The caller must supply verified geometry and a full, current scene.
+        A planner accepting the descriptor does not itself verify that geometry.
+        """
         arm = self._resolve_arm(arm)
         if strategy is None:
             strategy = self.default_motion_strategy or MotionStrategy()
@@ -685,10 +691,33 @@ class CapApi:
                 ErrorCode.INVALID_REQUEST,
                 "strategy must be a MotionStrategy",
             )
+        attachment_options: dict[str, object] = {}
+        if attached_object is not None:
+            from .providers.curobo.attachment import AttachedObjectGeometry
+
+            try:
+                if isinstance(attached_object, Mapping):
+                    attached_object = AttachedObjectGeometry(**attached_object)
+                if not isinstance(attached_object, AttachedObjectGeometry):
+                    raise ValueError("attached_object must be a valid attachment descriptor")
+            except (TypeError, ValueError) as exc:
+                return self._plan_failure(ErrorCode.INVALID_REQUEST, str(exc))
+            attachment_options["attached_object"] = attached_object
+            integrated_pose = isinstance(goal, Pose) and strategy.pose_planner != "composed"
+            if not integrated_pose and strategy.trajectory_planner == "interpolation":
+                return self._plan_failure(
+                    ErrorCode.UNSUPPORTED,
+                    "attached-object motion requires an attachment-aware planner",
+                )
         if target_point_cloud is not None and not isinstance(target_point_cloud, PointCloud):
             return self._plan_failure(
                 ErrorCode.INVALID_REQUEST,
                 "target_point_cloud must be a PointCloud or None",
+            )
+        if attachment_options and target_point_cloud is not None:
+            return self._plan_failure(
+                ErrorCode.INVALID_REQUEST,
+                "attached-object planning cannot also exclude a target bounding box",
             )
         if planning_scene is not None and not isinstance(planning_scene, PlanningScene):
             return self._plan_failure(
@@ -755,6 +784,8 @@ class CapApi:
                     ErrorCode.UNSUPPORTED,
                     f"integrated pose planner {strategy.pose_planner!r} is not configured",
                 )
+            if attachment_options and getattr(provider, "supports_attached_objects", False) is not True:
+                return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support attachments")
             planning_goal = goal
             adapter_transform = getattr(self._adapter, "ik_request", None)
             if callable(adapter_transform):
@@ -777,6 +808,7 @@ class CapApi:
                     ),
                     context=self._planning_context(planning_state),
                     **timing_options,
+                    **attachment_options,
                 )
                 validated = self._validate_plan_start(result, planning_state)
                 return self._bind_plan_start(validated, state)
@@ -823,6 +855,8 @@ class CapApi:
                     ErrorCode.UNSUPPORTED,
                     f"trajectory planner {strategy.trajectory_planner!r} is not configured",
                 )
+            if attachment_options and getattr(provider, "supports_attached_objects", False) is not True:
+                return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support attachments")
             try:
                 result = provider.plan_to_joints(
                     planning_state,
@@ -840,6 +874,7 @@ class CapApi:
                     ),
                     context=self._planning_context(state),
                     **timing_options,
+                    **attachment_options,
                 )
                 return self._validate_plan_start(result, planning_state)
             # Best-effort arm resolution must not mask the embodiment error.
@@ -1656,6 +1691,7 @@ class CapApi:
         target_point_cloud: PointCloud | None = None,
         planning_scene: PlanningScene | None = None,
         robot_state: RobotState | None = None,
+        attached_object: object | None = None,
     ) -> ExecutionResult:
         """Move to a Pose or an absolute position/frame plus quaternion or rpy_deg."""
         arm = self._resolve_arm(arm)
@@ -1678,6 +1714,7 @@ class CapApi:
             ("target_point_cloud", target_point_cloud),
             ("planning_scene", planning_scene),
             ("robot_state", robot_state),
+            ("attached_object", attached_object),
         ):
             if value is not None:
                 options[name] = value

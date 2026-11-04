@@ -1,8 +1,7 @@
 """Explicit held-object geometry helpers for cuRobo configuration.
 
-This module is deliberately not wired into :class:`CuRoboProvider`. A caller must
-provide the measured parent-to-object transform and collision spheres; the
-helpers only serialize those supplied values into the pinned cuRobo v2 schema.
+A caller must provide the measured parent-to-object transform and collision
+spheres; these helpers serialize them into the pinned cuRobo v2 schema.
 """
 
 from __future__ import annotations
@@ -74,8 +73,10 @@ class AttachedObjectGeometry:
                 raise ValueError(f"{field_name} must be a non-empty name")
         if self.object_link_name == self.parent_link_name:
             raise ValueError("object link and parent link must be different")
-        _validate_pose7(self.parent_to_object, name="parent_to_object")
-        _validate_spheres(self.collision_spheres)
+        parent_to_object = _validate_pose7(self.parent_to_object, name="parent_to_object")
+        collision_spheres = _validate_spheres(self.collision_spheres)
+        if isinstance(self.contact_link_names, str):
+            raise ValueError("contact_link_names must be a sequence of link names, not one string")
         contacts = tuple(self.contact_link_names)
         if not contacts or any(not isinstance(name, str) or not name.strip() for name in contacts):
             raise ValueError("contact_link_names must explicitly list at least one link")
@@ -83,6 +84,20 @@ class AttachedObjectGeometry:
             raise ValueError("contact_link_names must not contain duplicates")
         if self.object_link_name in contacts:
             raise ValueError("object link cannot be its own contact link")
+
+        # A frozen dataclass only protects its attributes from reassignment;
+        # callers may still pass mutable lists or arrays. Snapshot all sequence
+        # fields as immutable Python tuples so later caller mutation cannot
+        # change the collision geometry or its serialized payload.
+        object.__setattr__(
+            self, "parent_to_object", tuple(float(value) for value in parent_to_object)
+        )
+        object.__setattr__(
+            self,
+            "collision_spheres",
+            tuple(tuple(float(value) for value in row) for row in collision_spheres),
+        )
+        object.__setattr__(self, "contact_link_names", contacts)
 
     def pose_in_base(self, parent_pose_in_base: Any) -> np.ndarray:
         """Compose a measured parent pose with the supplied fixed attachment transform."""

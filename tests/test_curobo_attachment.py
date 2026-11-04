@@ -151,6 +151,43 @@ def test_attachment_rejects_missing_contacts_or_invalid_spheres() -> None:
         )
 
 
+def test_attachment_snapshots_mutable_sequences_as_immutable_tuples() -> None:
+    parent_to_object = [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+    collision_spheres = np.array([[0.0, 0.0, 0.0, 0.04]], dtype=np.float64)
+    contact_link_names = ["left_finger", "right_finger"]
+    attachment = AttachedObjectGeometry(
+        object_link_name="held_object",
+        attachment_joint_name="fixed",
+        parent_link_name="verified_tool_frame",
+        parent_to_object=parent_to_object,
+        collision_spheres=collision_spheres,
+        contact_link_names=contact_link_names,
+    )
+
+    parent_to_object[2] = 10.0
+    collision_spheres[0, 3] = 10.0
+    contact_link_names[0] = "unrelated_link"
+
+    assert attachment.parent_to_object == (0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0)
+    assert attachment.collision_spheres == ((0.0, 0.0, 0.0, 0.04),)
+    assert attachment.contact_link_names == ("left_finger", "right_finger")
+    assert attachment.to_payload()["collision_spheres"] == [[0.0, 0.0, 0.0, 0.04]]
+    with pytest.raises(TypeError):
+        attachment.collision_spheres[0][3] = 0.5  # type: ignore[index]
+
+
+def test_attachment_rejects_contact_names_as_one_string() -> None:
+    with pytest.raises(ValueError, match="sequence of link names"):
+        AttachedObjectGeometry(
+            "held_object",
+            "fixed",
+            "tool",
+            (0, 0, 0, 1, 0, 0, 0),
+            ((0, 0, 0, 0.1),),
+            "finger",
+        )
+
+
 def _service_payload(*, attached: dict[str, object] | None = None) -> dict[str, object]:
     payload: dict[str, object] = {
         "base_frame": "robot_base",
@@ -325,7 +362,45 @@ class _JsonSession:
         return _JsonResponse(self.response)
 
 
-def test_typed_plan_request_reaches_service_and_marks_geometry_unverified() -> None:
+@pytest.mark.parametrize(
+    ("response_fields", "expected_ok"),
+    [
+        pytest.param(
+            {
+                "attachment_diagnostics": {
+                    "object_link": "held_object",
+                    "collision_model": "caller_supplied_spheres",
+                }
+            },
+            True,
+            id="matching-service-ack",
+        ),
+        pytest.param({}, False, id="legacy-service-omitted-ack"),
+        pytest.param(
+            {
+                "attachment_diagnostics": {
+                    "object_link": "different_object",
+                    "collision_model": "caller_supplied_spheres",
+                }
+            },
+            False,
+            id="wrong-object-link-ack",
+        ),
+        pytest.param(
+            {
+                "attachment_diagnostics": {
+                    "object_link": "held_object",
+                    "collision_model": "robot_spheres_only",
+                }
+            },
+            False,
+            id="wrong-collision-model-ack",
+        ),
+    ],
+)
+def test_typed_plan_requires_matching_attachment_service_ack(
+    response_fields: dict[str, object], expected_ok: bool
+) -> None:
     attachment = _attachment()
     state = RobotState(
         joint_positions=np.zeros(7),
@@ -351,6 +426,7 @@ def test_typed_plan_request_reaches_service_and_marks_geometry_unverified() -> N
             "joint_positions_base64": encode_numpy(np.zeros((2, 7), dtype=np.float64)),
             "dt_s": 0.1,
         }
+        | response_fields
     )
 
     result = CuRoboProvider(session=session).plan_to_pose(  # type: ignore[arg-type]
@@ -361,12 +437,58 @@ def test_typed_plan_request_reaches_service_and_marks_geometry_unverified() -> N
         attached_object=attachment,
     )
 
-    assert result.ok
     payload = session.calls[0]["json"]
     assert isinstance(payload, dict)
     assert payload["attached_object"] == attachment.to_payload()
-    assert result.diagnostics["attached_object_geometry_verified"] is False
-    assert result.diagnostics["attached_object_scene_carve_may_remove_support_points"] is True
+    assert result.ok is expected_ok
+    if expected_ok:
+        assert result.diagnostics["attached_object_geometry_verified"] is False
+        assert result.diagnostics["attached_object_scene_carve_may_remove_support_points"] is True
+    else:
+        assert result.error is not None
+        assert "attachment" in str(result.error.details.get("error", ""))
+
+
+def test_synchronized_attached_plan_rejects_legacy_service_response() -> None:
+    attachment = _attachment()
+    pose = Pose([0.2, 0.0, 0.1], [1, 0, 0, 0], "robot_base")
+    state = RobotState(
+        joint_positions=np.zeros(7),
+        joint_velocities=np.zeros(7),
+        end_effector_poses=pose,
+        gripper_positions=0.5,
+        base_frame="robot_base",
+        joint_names=[f"joint_{index}" for index in range(7)],
+        embodiment="robosuite",
+    )
+    context = RobotPlanningContext(
+        embodiment="robosuite",
+        model="panda",
+        joint_names=state.joint_names,
+        base_transforms={"primary": np.eye(4)},
+        end_effector_links={"primary": "verified_tool_frame"},
+    )
+    scene = PlanningScene(PointCloud(points=np.array([[0.1, 0.0, 0.0]]), frame="robot_base"))
+    session = _JsonSession(
+        {
+            "joint_positions_base64": {
+                "primary": encode_numpy(np.zeros((2, 7), dtype=np.float64))
+            },
+            "dt_s": 0.1,
+        }
+    )
+
+    result = CuRoboProvider(session=session).plan_synchronized_motion(  # type: ignore[arg-type]
+        state,
+        {"primary": pose},
+        scene=scene,
+        context=context,
+        attached_object=attachment,
+    )
+
+    assert not result.ok
+    assert result.error is not None
+    assert "attachment diagnostics" in str(result.error.details.get("error", ""))
 
 
 def test_service_scene_carve_uses_object_fk_and_preserves_neighboring_table(

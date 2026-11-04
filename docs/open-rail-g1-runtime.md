@@ -48,15 +48,20 @@ worker/command readiness. Missing values remain `null` and are listed in
 
 ## Camera source and alignment
 
-The static `develop/fisheye_camera_conf.json` publishes cam8 `head_color` at
-1280x800 and has no `head_depth` entry. This accounts for the previous missing
-depth frame: the A2D SDK maps `head_depth` to `/camera/head_depth`. The separate
+The original `develop/fisheye_camera_conf.json` published cam8 `head_color` at
+1280x800 without `head_depth`. This accounted for the previous missing depth
+frame: the A2D SDK maps `head_depth` to `/camera/head_depth`. The separate
 `camera_copilot/d457_fisheye_camera_conf_53.json` file configures cam7
 `head_depth` at 1280x720 and cam8 `head_color` at 1280x800, but it is not the
 `develop` configuration and does not declare image encoding or calibration.
 The camera receiver decodes a packet as uint16 `(H,W,1)` only when its format is
 `RS2_FORMAT_Z16`; the config file alone does not prove that the cam7 publisher
 uses that format.
+
+After adding the cam7 entry and a scoped camera-app restart attempt, the
+supervisor relaunched Cosine and a raw 1280x800 Z16 packet was captured; see
+`docs/open-rail-apple-status.md` for the restart response and evidence. This
+does not establish the depth scale or alignment.
 
 The color intrinsic file has no image dimensions. The head extrinsic file has a
 rotation and translation but no source/destination frame names. No depth scale,

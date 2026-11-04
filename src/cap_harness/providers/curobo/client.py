@@ -74,6 +74,21 @@ def _attachment_diagnostics(attachment: AttachedObjectGeometry | None) -> dict[s
     }
 
 
+def _validate_attachment_ack(
+    response: Mapping[str, object], attachment: AttachedObjectGeometry | None
+) -> None:
+    """Reject responses from services that did not apply the requested object model."""
+    if attachment is None:
+        return
+    diagnostics = response.get("attachment_diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        raise ValueError("cuRobo response omitted attachment diagnostics")
+    if diagnostics.get("object_link") != attachment.object_link_name:
+        raise ValueError("cuRobo attachment diagnostics acknowledged a different object link")
+    if diagnostics.get("collision_model") != "caller_supplied_spheres":
+        raise ValueError("cuRobo attachment diagnostics did not acknowledge caller-supplied spheres")
+
+
 PANDA_EEF_TO_HAND_OFFSET_M = np.array([0.0, 0.0, -0.1], dtype=np.float64)
 # cuRobo times trajectories to the real Panda's joint-speed limits; the sim's
 # plan-tracking controller cannot follow that timing. Stretch plans to this
@@ -84,6 +99,8 @@ DEFAULT_TIME_DILATION = 0.4
 
 class CuRoboProvider:
     """Use cuRobo without importing CUDA extensions into the harness process."""
+
+    supports_attached_objects = True
 
     def __init__(
         self,
@@ -280,6 +297,7 @@ class CuRoboProvider:
         planning_mode = "pose" if isinstance(target, Pose) else "cspace"
         try:
             response = self._http.post_json(PLAN_PATH, payload)
+            _validate_attachment_ack(response, attached_object)
             raw = decode_numpy(response.get("joint_positions_base64"))
             source_dt = float(response.get("dt_s"))
             waypoints = self._resample(
@@ -382,6 +400,7 @@ class CuRoboProvider:
             )
         try:
             response = self._http.post_json(PLAN_SYNCHRONIZED_PATH, payload)
+            _validate_attachment_ack(response, attached_object)
             source_dt = float(response.get("dt_s"))
             encoded = response.get("joint_positions_base64")
             if not isinstance(encoded, Mapping) or set(encoded) != set(targets):

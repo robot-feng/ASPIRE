@@ -23,7 +23,9 @@ from cap_harness.contracts import (
     TaskContext,
     Trajectory,
 )
+from cap_harness.errors import ApiError, ErrorCode
 from cap_harness.registry import ToolRegistry
+from cap_harness.runtime import ProgramExecutor
 
 
 def _pose(position=(0.0, 0.0, 0.0), frame="base") -> Pose:
@@ -409,6 +411,118 @@ def test_explicit_planning_scene_must_match_robot_base_frame() -> None:
     assert not result.ok
     assert result.error is not None
     assert "expected 'base'" in result.error.message
+
+
+def _attachment() -> dict:
+    return {
+        "object_link_name": "apple_link",
+        "attachment_joint_name": "apple_joint",
+        "parent_link_name": "tcp",
+        "parent_to_object": [0, 0, 0.1, 1, 0, 0, 0],
+        "collision_spheres": [[0, 0, 0, 0.05]],
+        "contact_link_names": ["finger"],
+    }
+
+
+def test_program_passes_attachment_to_capable_pose_planner() -> None:
+    class Planner(_PosePlanner):
+        supports_attached_objects = True
+
+        def plan_to_pose(self, robot_state, target_pose, **kwargs):
+            self.attachment = kwargs["attached_object"]
+            return super().plan_to_pose(robot_state, target_pose, **kwargs)
+
+    observation = _observation()
+    planner = Planner()
+    api = CapApi(
+        _Adapter(observation),  # type: ignore[arg-type]
+        integrated_pose_planning_providers={"curobo-integrated": planner},
+        default_camera="head",
+    )
+    program = f"""
+target = Pose(position=[0, 0, 0], quaternion_wxyz=[1, 0, 0, 0], frame='base')
+result = plan_motion(target, strategy=MotionStrategy(pose_planner='curobo-integrated'),
+                     attached_object={_attachment()!r}).ok
+"""
+
+    execution = ProgramExecutor(api.register_tools(ToolRegistry())).execute_program(program)
+
+    assert execution.ok and execution.result is True
+    assert planner.attachment.object_link_name == "apple_link"
+
+
+def test_attached_object_rejects_interpolation_or_unsupported_provider() -> None:
+    observation = _observation()
+    api = CapApi(
+        _Adapter(observation),  # type: ignore[arg-type]
+        integrated_pose_planning_providers={"curobo-integrated": _PosePlanner()},
+        default_camera="head",
+    )
+
+    interpolation = api.plan_motion(_pose(), attached_object=_attachment())
+    unsupported = api.plan_motion(
+        _pose(),
+        strategy=MotionStrategy(pose_planner="curobo-integrated"),
+        attached_object=_attachment(),
+    )
+
+    assert not interpolation.ok and interpolation.error.code.value == "unsupported"
+    assert not unsupported.ok and unsupported.error.code.value == "unsupported"
+
+
+def test_joint_planner_receives_the_attached_object() -> None:
+    class Planner(_JointPlanner):
+        supports_attached_objects = True
+
+        def plan_to_joints(self, robot_state, target, **kwargs):
+            self.attachment = kwargs["attached_object"]
+            return super().plan_to_joints(robot_state, target, **kwargs)
+
+    planner = Planner()
+    api = CapApi(
+        _Adapter(_observation()),  # type: ignore[arg-type]
+        trajectory_planning_providers={"curobo": planner},
+        default_camera="head",
+    )
+
+    result = api.plan_motion(
+        np.ones(7),
+        strategy=MotionStrategy(trajectory_planner="curobo"),
+        attached_object=_attachment(),
+    )
+
+    assert result.ok
+    assert planner.attachment.object_link_name == "apple_link"
+
+
+def test_attached_object_cannot_also_remove_a_target_bounding_box() -> None:
+    api = CapApi(_Adapter(_observation()))  # type: ignore[arg-type]
+    target = PointCloud(points=np.array([[0.0, 0.0, 1.0]]), frame="base")
+
+    result = api.plan_motion(
+        _pose(),
+        strategy=MotionStrategy(pose_planner="curobo-integrated"),
+        attached_object=_attachment(),
+        target_point_cloud=target,
+    )
+
+    assert not result.ok and result.error.code.value == "invalid_request"
+
+
+def test_move_to_pose_forwards_attachment_and_does_not_execute_failed_plan() -> None:
+    api = CapApi(_Adapter(_observation()))  # type: ignore[arg-type]
+    observed = {}
+
+    def fail_plan(_target, **kwargs):
+        observed.update(kwargs)
+        return PlanResult(ok=False, error=ApiError(ErrorCode.PLANNING_FAILED, "test failure"))
+
+    api.plan_motion = fail_plan  # type: ignore[method-assign]
+    attachment = _attachment()
+    result = api.move_to_pose(_pose(), attached_object=attachment)
+
+    assert not result.ok
+    assert observed["attached_object"] is attachment
 
 
 def test_unconfigured_grasp_backend_does_not_acquire_a_camera_frame() -> None:

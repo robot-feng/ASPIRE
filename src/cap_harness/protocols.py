@@ -100,6 +100,7 @@ class TrajectoryPlanningProvider(Protocol):
         time_dilation_factor: float | None = None,
         interpolation_dt_s: float | None = None,
         maximum_trajectory_dt_s: float | None = None,
+        attached_object: object | None = None,
     ) -> PlanResult:
         """Plan a timed joint trajectory or return a typed planning failure."""
         ...
@@ -121,6 +122,7 @@ class IntegratedPosePlanningProvider(Protocol):
         time_dilation_factor: float | None = None,
         interpolation_dt_s: float | None = None,
         maximum_trajectory_dt_s: float | None = None,
+        attached_object: object | None = None,
     ) -> PlanResult:
         """Plan directly to a Cartesian pose without an external IK result."""
         ...
