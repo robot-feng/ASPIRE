@@ -56,12 +56,37 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   was 18.77 ms after RGB, 74.28% of raw depth values were nonzero, and head/waist
   state was about 24.9 ms older than RGB. No synchronization tolerance, metric
   scale, RGB-depth alignment, or camera-to-base transform is yet verified.
-  No apple is visible on the work surface in that frame. The raw-value preview
-  is not a metric point cloud.
+  No apple is visible on the work surface in that frame. The raw-value and
+  RGB/depth-boundary previews are qualitative; they do not establish metric
+  scale, registration, or a metric point cloud.
+- After the operator placed an apple, a further raw capture was saved under
+  `artifacts/open_rail/observe_apple_20261104/`; RGB and depth timestamps
+  differ by 3.95 ms, with no verified synchronization tolerance. The capture
+  labels its RGB order as `RGB`, but the operator confirmed its blue-looking
+  apple and purple-looking dish are actually red and pink. A channel-swapped
+  diagnostic and the operator confirmation are recorded in `color_check.json`;
+  the original frame is preserved. GPU inference on the color-corrected saved
+  frame returned one apple mask; the uncorrected frame returned no target.
+  Outputs are under `observe_apple_20261104/wevisone_gpu/`. The frame is not
+  suitable for control.
+- A subsequent live capture after the adapter's packet-aware RGB fix is under
+  `artifacts/open_rail/observe_apple_rgbfixed_20261104/`. It shows the confirmed
+  red apple and pink dish, identifies the RGB packet as JPEG/RGB, and matches
+  its source timestamp exactly. A Z16 depth frame was also captured, 8.24 ms
+  after RGB. Its scale, registration and synchronization tolerance remain
+  unverified, so this capture is still raw evidence rather than a planning scene.
+- A later depth-required capture at
+  `artifacts/open_rail/observe_apple_final_20261104/` also shows the red apple
+  and records JPEG/RGB plus uncompressed Z16 metadata. RGB and depth differ by
+  18.98 ms. It is raw evidence, with the same outstanding calibration gaps.
 - WeVisOne-VL and GraspGen-X files occupy 4.6 GB and 1.6 GB respectively under
   ignored `third_party/models/` paths. GraspGen-X generator and discriminator
   checkpoints have been decoded with `torch.load(..., map_location="cpu",
   weights_only=True)`; this is a file-integrity check, not model inference.
+- An isolated GraspGen-X service/client GPU smoke test on an official generic
+  sample returned five candidates. Its sample gripper descriptor is not the
+  G1's, and no scene collision or robot execution was checked. Evidence is in
+  `artifacts/open_rail/graspgenx_generic_smoke_20261104/`.
 - The WeVisOne local snapshot has 626 tensors; its weight and decoder hashes
   match the download metadata. An isolated CPU-only probe using the installed
   NVIDIA Torch 2.4 prerelease and Transformers 4.57 loaded the weights and
@@ -94,9 +119,15 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   mapping from this value to the candidate URDF's gripper joint angle or actual
   opening width has not been established; it cannot yet support swept-volume
   or grasp-width checks.
-- The existing cuRobo service has no G1 robot model or attached-object geometry;
-  its `collision_aware` flag alone cannot establish collision clearance for a
-  grasp or a lift carrying the apple.
+- The cuRobo service has no G1 robot model. Its optional generic attached-sphere
+  path and `collision_aware` flag alone cannot establish collision clearance
+  for a G1 grasp or a lift carrying the apple.
+- On Orin, the isolated cuRobo CUDA 12.2 environment successfully planned a
+  generic Franka motion through the ASPIRE HTTP client, including a separate
+  test with a synthetic attached sphere. Logs and scripts are in
+  `artifacts/open_rail/curobo_generic_smoke_20261104/`. This combination uses
+  NVIDIA Torch 2.4.0a0, below the upstream declared `torch>=2.5` requirement;
+  it is an experimental compatibility result, not a supported G1 planner.
 
 ## Offline regression evidence
 

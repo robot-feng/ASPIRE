@@ -63,6 +63,14 @@ supervisor relaunched Cosine and a raw 1280x800 Z16 packet was captured; see
 `docs/open-rail-apple-status.md` for the restart response and evidence. This
 does not establish the depth scale or alignment.
 
+Static inspection of the installed camera library found a default D457
+depth-to-color alignment path that reads device calibration tables and uses a
+0.001 m/count projection constant. Its caller does not check the alignment
+function's return value; some allocation failures can still publish the
+untransformed buffer. The packet contains no alignment-success or depth-scale
+metadata. Thus neither the alignment path nor its constant verifies this
+particular frame's registration or physical depth scale.
+
 The color intrinsic file has no image dimensions. The head extrinsic file has a
 rotation and translation but no source/destination frame names. No depth scale,
 depth intrinsics, or depth-to-color transform was found. The two camera topics

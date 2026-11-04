@@ -22,6 +22,7 @@ def main() -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--require-depth", action="store_true")
     parser.add_argument("--maximum-skew-ms", type=float, default=None)
     args = parser.parse_args()
 
@@ -30,7 +31,7 @@ def main() -> int:
         open_rail_root=args.open_rail_root,
         maximum_rgb_depth_skew_ms=args.maximum_skew_ms,
     ) as runtime:
-        snapshot = runtime.read_snapshot(timeout_s=args.timeout)
+        snapshot = runtime.read_snapshot(timeout_s=args.timeout, require_depth=args.require_depth)
 
     Image.fromarray(snapshot.rgb).save(args.output / "head_rgb.png")
     if snapshot.depth_u16 is not None:

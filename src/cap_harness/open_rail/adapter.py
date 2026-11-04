@@ -150,6 +150,16 @@ class OpenRailAdapter:
         denied = self._motion_denied()
         if denied is not None:
             return ExecutionResult(ok=False, steps_executed=0, error=denied)
+        if not trajectory.collision_aware:
+            return ExecutionResult(
+                ok=False,
+                steps_executed=0,
+                error=ApiError(
+                    ErrorCode.SAFETY_INTERLOCK,
+                    "Open-RAIL trajectories require collision checking",
+                    recoverable=False,
+                ),
+            )
         if trajectory.embodiment != self.embodiment:
             return ExecutionResult(
                 ok=False,

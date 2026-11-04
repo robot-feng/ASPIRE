@@ -158,6 +158,9 @@ class OpenRailG1ObservationRuntime:
             self.profile.depth_channel.removeprefix("cam."): self.profile.depth_channel.removeprefix("cam."),
         }
         config.camera.depth_ref = self.profile.depth_channel.removeprefix("cam.")
+        # G1RobotBody returns RGB only after checking packet encoding and
+        # color_format. Keep downstream Open-RAIL image encoding aligned.
+        config.camera.color_order = "rgb"
         config.allow_physical_motion = self.allow_physical_motion
         return robot_proxy(
             robot_type=self.profile.robot_type,
@@ -191,20 +194,30 @@ class OpenRailG1ObservationRuntime:
 
         proxy._track_remote_shm = track
 
-    def read_snapshot(self, *, timeout_s: float = 5.0) -> OpenRailSnapshot:
+    def read_snapshot(
+        self, *, timeout_s: float = 5.0, require_depth: bool = False
+    ) -> OpenRailSnapshot:
         if self._closed:
             raise OpenRailG1ObservationError("G1 observation runtime is closed")
-        if timeout_s <= 0:
-            raise ValueError("timeout_s must be positive")
-        deadline = time.monotonic() + timeout_s
+        if type(require_depth) is not bool:
+            raise ValueError("require_depth must be a bool")
+        try:
+            timeout = float(timeout_s)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("timeout_s must be positive and finite") from exc
+        if isinstance(timeout_s, bool) or not np.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout_s must be positive and finite")
+        deadline = time.monotonic() + timeout
         while True:
             observation = self._proxy.retrieve_observation()
             if observation is not None:
                 snapshot = self._decode(observation)
                 self._last_snapshot = snapshot
-                return snapshot
+                if not require_depth or snapshot.depth_u16 is not None:
+                    return snapshot
             if time.monotonic() >= deadline:
-                raise TimeoutError(f"no new Open-RAIL G1 frame within {timeout_s:.1f}s")
+                needed = "RGB-D frame" if require_depth else "frame"
+                raise TimeoutError(f"no new Open-RAIL G1 {needed} within {timeout:.1f}s")
             threading.Event().wait(0.005)
 
     def command_runtime(
@@ -333,6 +346,37 @@ class OpenRailG1ObservationRuntime:
         )
 
     def _decode(self, observation: dict[str, Any]) -> OpenRailSnapshot:
+        rgb_error = observation.get("rgb_error")
+        if rgb_error is not None:
+            raise OpenRailG1ObservationError(f"RGB packet rejected: {rgb_error}")
+        rgb_timestamp = observation.get("rgb_timestamp_ns")
+        if rgb_timestamp is None:
+            rgb_timestamp = observation.get("ref_timestamp")
+        if rgb_timestamp is None:
+            raise OpenRailG1ObservationError("observation has no RGB source timestamp")
+        rgb_timestamp = int(rgb_timestamp)
+        rgb_packet_timestamp = observation.get("rgb_packet_timestamp_ns")
+        if rgb_packet_timestamp is None or int(rgb_packet_timestamp) != rgb_timestamp:
+            raise OpenRailG1ObservationError(
+                "RGB packet timestamp does not match the decoded frame timestamp"
+            )
+        rgb_encoding = observation.get("rgb_encoding_format")
+        rgb_color_format = observation.get("rgb_color_format")
+        rgb_decoder = observation.get("rgb_decoder")
+        valid_rgb_decoders = {
+            ("JPEG", "opencv-imdecode-bgr-to-rgb"),
+            ("PNG", "opencv-imdecode-bgr-to-rgb"),
+            ("UNCOMPRESSED", "raw-rgb"),
+            ("UNCOMPRESSED", "raw-bgr-to-rgb"),
+        }
+        if (
+            observation.get("rgb_order") != "RGB"
+            or rgb_color_format not in {"RGB", "BGR"}
+            or (rgb_encoding, rgb_decoder) not in valid_rgb_decoders
+        ):
+            raise OpenRailG1ObservationError(
+                "RGB packet encoding/color_format has no verified RGB decoder"
+            )
         rgb = np.asarray(observation.get(self.profile.rgb_channel))
         if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.dtype != np.uint8:
             raise OpenRailG1ObservationError(f"invalid RGB frame: shape={rgb.shape}, dtype={rgb.dtype}")
@@ -358,12 +402,6 @@ class OpenRailG1ObservationRuntime:
             str(name): None if stamp is None else int(stamp)
             for name, stamp in (observation.get("state_timestamps_ns") or {}).items()
         }
-        raw_rgb_timestamp = observation.get("rgb_timestamp_ns")
-        if raw_rgb_timestamp is None:
-            raw_rgb_timestamp = observation.get("ref_timestamp")
-        if raw_rgb_timestamp is None:
-            raise OpenRailG1ObservationError("observation has no RGB source timestamp")
-        rgb_timestamp = int(raw_rgb_timestamp)
         raw_depth_stamp = observation.get("depth_timestamp_ns")
         depth_timestamp = None if raw_depth_stamp is None else int(raw_depth_stamp)
         calibration = _plain(self.profile.calibration)
@@ -372,9 +410,15 @@ class OpenRailG1ObservationRuntime:
             "robot_type": self.profile.robot_type,
             "public_camera_key": self.profile.public_camera_key,
             "rgb_order": str(observation.get("rgb_order", "unknown")),
+            "rgb_encoding_format": rgb_encoding,
+            "rgb_color_format": rgb_color_format,
+            "rgb_decoder": rgb_decoder,
+            "rgb_packet_timestamp_ns": int(rgb_packet_timestamp),
             "rgb_shape": list(rgb.shape),
             "depth_shape": None if depth is None else list(depth.shape),
             "depth_encoding": observation.get("depth_encoding"),
+            "depth_encoding_format": observation.get("depth_encoding_format"),
+            "depth_color_format": observation.get("depth_color_format"),
             "depth_error": observation.get("depth_error"),
             "depth_scale_m_per_unit": calibration.get("depth_scale_m_per_unit"),
             "depth_registered_to_rgb": calibration.get("depth_registered_to_rgb"),

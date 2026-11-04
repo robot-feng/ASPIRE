@@ -53,7 +53,11 @@ def _observation(*, depth: np.ndarray | None = None) -> dict[str, object]:
         "cam.head": np.full((3, 5, 3), 17, dtype=np.uint8),
         "obs.state": np.arange(20, dtype=np.float32),
         "rgb_timestamp_ns": 1_000_000_000,
+        "rgb_packet_timestamp_ns": 1_000_000_000,
         "rgb_order": "RGB",
+        "rgb_encoding_format": "UNCOMPRESSED",
+        "rgb_color_format": "RGB",
+        "rgb_decoder": "raw-rgb",
         "state_timestamps_ns": {
             "arm": 999_800_000,
             "gripper_left": 999_810_000,
@@ -130,6 +134,31 @@ def test_missing_depth_stays_raw_and_is_not_reported_as_synchronized(tmp_path) -
     assert snapshot.depth_u16 is None
     assert snapshot.depth_timestamp_ns is None
     assert not snapshot.is_synchronized
+    adapter.close()
+
+
+def test_require_depth_skips_rgb_only_warmup_frame(tmp_path) -> None:
+    class Proxy(_Proxy):
+        def __init__(self):
+            self.frames = iter((_observation(), _observation(depth=np.ones((2, 3), dtype=np.uint16))))
+
+        def retrieve_observation(self):
+            return next(self.frames)
+
+    adapter = OpenRailG1ObservationRuntime(open_rail_root=tmp_path, proxy=Proxy())
+
+    snapshot = adapter.read_snapshot(timeout_s=1.0, require_depth=True)
+
+    assert snapshot.depth_u16 is not None
+    assert not snapshot.is_synchronized
+    adapter.close()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), True])
+def test_observation_timeout_must_be_positive_finite(tmp_path, timeout) -> None:
+    adapter = OpenRailG1ObservationRuntime(open_rail_root=tmp_path, proxy=_Proxy())
+    with pytest.raises(ValueError, match="positive and finite"):
+        adapter.read_snapshot(timeout_s=timeout)
     adapter.close()
 
 
@@ -331,6 +360,7 @@ def test_runtime_passes_profile_camera_key_and_channel_to_fake_proxy(
     assert config.camera.ref == "rgb_main"
     assert config.camera.names == {"rgb_main": "rgb_main", "z16": "z16"}
     assert config.camera.depth_ref == "z16"
+    assert config.camera.color_order == "rgb"
     assert config.allow_physical_motion is False
     runtime.close()
 
@@ -341,20 +371,40 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     class FakePacket:
         type = 1
         color_format = 2
+        encoding_format = 3
         image_width = 2
         image_height = 1
-        send_timestamp = 101
+
+        def __init__(self, *, timestamp, color_format, encoding_format, payload):
+            self.send_timestamp = timestamp
+            self.color_format = color_format
+            self.encoding_format = encoding_format
+            self.payload = payload
 
         def get_image_data(self):
-            return np.array([12, 34], dtype=np.uint16).tobytes()
+            return self.payload
 
     class FakeCamera:
         def __init__(self) -> None:
             self.requested: list[tuple[str, int]] = []
+            self.rgb_packet = FakePacket(
+                timestamp=100,
+                color_format=1,
+                encoding_format=3,
+                payload=bytes([1, 2, 3, 4, 5, 6]),
+            )
+            self.depth_packet = FakePacket(
+                timestamp=101,
+                color_format=2,
+                encoding_format=3,
+                payload=np.array([12, 34], dtype=np.uint16).tobytes(),
+            )
 
         def get_packet_nearest(self, camera_channel, reference_timestamp):
             self.requested.append((camera_channel, reference_timestamp))
-            return FakePacket()
+            if camera_channel == "sdk/color":
+                return self.rgb_packet
+            return self.depth_packet
 
     class Buffer:
         def read_nearest(self, _timestamp):
@@ -399,7 +449,8 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     monkeypatch.setitem(sys.modules, "client.robots.agibot_g1.body_robot", body_module)
     cosine_bus = ModuleType("cosine_bus")
     cosine_bus.PacketType = SimpleNamespace(IMAGE=1)
-    cosine_bus.ColorFormat = SimpleNamespace(RS2_FORMAT_Z16=2)
+    cosine_bus.ColorFormat = SimpleNamespace(RGB=1, BGR=4, RS2_FORMAT_Z16=2)
+    cosine_bus.EncodingFormat = SimpleNamespace(JPEG=1, PNG=2, UNCOMPRESSED=3)
     monkeypatch.setitem(sys.modules, "cosine_bus", cosine_bus)
 
     body_path = (
@@ -431,7 +482,72 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
         "rgb_main": "sdk/color",
         "range_image": "sdk/range",
     }
-    assert body.camera.requested == [("sdk/range", 100)]
+    assert body.camera.requested == [("sdk/color", 100), ("sdk/range", 100)]
+    np.testing.assert_array_equal(
+        observation["cam.rgb_main"], np.array([[[1, 2, 3], [4, 5, 6]]], dtype=np.uint8)
+    )
+    assert observation["rgb_order"] == "RGB"
+    assert observation["rgb_encoding_format"] == "UNCOMPRESSED"
+    assert observation["rgb_color_format"] == "RGB"
+    assert observation["rgb_decoder"] == "raw-rgb"
+    assert observation["rgb_packet_timestamp_ns"] == observation["rgb_timestamp_ns"]
+    # Open-RAIL's FramePacket transports only 16 non-image fields. Keep this
+    # observation below that bound so later diagnostics are not silently lost.
+    scalar_fields = [key for key in observation if not key.startswith("cam.")]
+    assert len(scalar_fields) <= 16
+    assert observation["depth_color_format"] == "2"
     np.testing.assert_array_equal(
         observation["cam.range_image"], np.array([[12, 34]], dtype=np.uint16)
     )
+
+    body.camera.rgb_packet = FakePacket(
+        timestamp=100,
+        color_format=4,
+        encoding_format=3,
+        payload=bytes([3, 2, 1, 6, 5, 4]),
+    )
+    bgr_observation = body.retrieve_observation()
+    np.testing.assert_array_equal(
+        bgr_observation["cam.rgb_main"], np.array([[[1, 2, 3], [4, 5, 6]]], dtype=np.uint8)
+    )
+    assert bgr_observation["rgb_decoder"] == "raw-bgr-to-rgb"
+
+    cv2 = ModuleType("cv2")
+    cv2.IMREAD_COLOR = 1
+    cv2.imdecode = lambda _encoded, _flags: np.array(
+        [[[30, 20, 10], [60, 50, 40]]], dtype=np.uint8
+    )
+    monkeypatch.setitem(sys.modules, "cv2", cv2)
+    body.camera.rgb_packet = FakePacket(
+        timestamp=100,
+        color_format=1,
+        encoding_format=1,
+        payload=b"jpeg",
+    )
+    jpeg_observation = body.retrieve_observation()
+    np.testing.assert_array_equal(
+        jpeg_observation["cam.rgb_main"],
+        np.array([[[10, 20, 30], [40, 50, 60]]], dtype=np.uint8),
+    )
+    assert jpeg_observation["rgb_decoder"] == "opencv-imdecode-bgr-to-rgb"
+    assert jpeg_observation["rgb_color_format"] == "RGB"
+
+    body.camera.rgb_packet = FakePacket(
+        timestamp=99,
+        color_format=1,
+        encoding_format=3,
+        payload=bytes([1, 2, 3, 4, 5, 6]),
+    )
+    mismatched = body.retrieve_observation()
+    assert "cam.rgb_main" not in mismatched
+    assert "timestamp does not match" in mismatched["rgb_error"]
+
+    body.camera.rgb_packet = FakePacket(
+        timestamp=100,
+        color_format=1,
+        encoding_format=999,
+        payload=bytes([1, 2, 3, 4, 5, 6]),
+    )
+    unknown = body.retrieve_observation()
+    assert "cam.rgb_main" not in unknown
+    assert "unsupported RGB packet encoding_format" in unknown["rgb_error"]

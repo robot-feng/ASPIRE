@@ -175,6 +175,27 @@ def test_enabled_control_resolves_aliases_and_validates_gripper_range() -> None:
     assert not invalid.ok
 
 
+def test_unchecked_trajectory_is_rejected_before_transport() -> None:
+    profile = _profile()
+    control = _Control(profile)
+    adapter = OpenRailAdapter(control, profile, allow_physical_motion=True, controlled_arms=("right",))
+    trajectory = Trajectory(
+        joint_positions=np.zeros((1, 7)),
+        dt_s=0.05,
+        joint_names=profile.joint_names["right"],
+        planner="test",
+        collision_aware=False,
+        expected_start=control.observation.robot_state,
+        arm="right",
+        embodiment=profile.embodiment,
+    )
+
+    result = adapter.execute_trajectory(trajectory)
+
+    assert result.error.code.value == "safety_interlock"
+    assert control.commands == []
+
+
 def test_single_arm_scope_rejects_other_arm_before_transport() -> None:
     profile = _profile()
     control = _Control(profile)

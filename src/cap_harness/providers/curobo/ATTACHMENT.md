@@ -26,8 +26,9 @@ is based on the pinned cuRobo source at `/data/ASPIRE/third_party/curobo`:
 `KinematicsLoaderCfg.extra_links`, `LinkParams.create`,
 `KinematicsLoaderCfg.extra_collision_spheres`, and the example attachment link
 in `curobo/content/configs/robot/franka.yml`. The helper uses the fixed link's
-seven-value transform and local sphere centers; its config mapping has only
-been tested without constructing a cuRobo planner. Service-side config
+seven-value transform and local sphere centers. A generic Franka service/client
+smoke test with a synthetic attached sphere succeeded on Orin; this is not G1
+or physical-scene verification. Service-side config
 generation verifies the parent/contact names exist in the selected URDF and
 that contact links are in the parent link's gripper subtree. It rejects
 nonstandard `<loop_joint>` tags because the supported model is a tree. The
@@ -69,8 +70,8 @@ generating an attachment config. The SDK's normalized gripper command is not a
 verified mapping to every articulated/mimic joint in this URDF. The helper
 therefore does not contain G1 joint defaults, a guessed TCP, or a ready-to-run
 G1 robot config. The service model literal remains `panda`, `dual_panda`, or
-`yam_real`; G1 cannot be selected through this path. No hardware or GPU
-validation was performed.
+`yam_real`; G1 cannot be selected through this path. No G1 hardware validation
+was performed.
 
 The existing target point cloud removal in `CapApi._exclude_target_from_scene`
 uses an expanded target AABB. A local surface-distance alternative may preserve

@@ -1,14 +1,15 @@
 # Open-RAIL embodiment adapter
 
-`src/cap_harness/open_rail/g1_runtime.py` is the G1-specific, read-only
-observation reader used alongside the generic Open-RAIL embodiment boundary.
+`src/cap_harness/open_rail/g1_runtime.py` is the G1-specific observation and
+scoped-command runtime used alongside the generic Open-RAIL embodiment boundary.
 It owns one `RobotProxy` and exposes raw RGB, raw Z16 depth when available,
 source timestamps, and the configured state vector. The G1 observation profile
 is `src/cap_harness/configs/open_rail/agibot_g1_observation.yaml`. Open-RAIL
 remains an external dependency; its checkout is not modified.
 
-The G1 reader is intentionally read-only. It does not implement ASPIRE's motion
-`EnvironmentAdapter` contract because G1 gripper geometry, TCP, active
+The observation path is read-only. The separately gated command facade does
+not yet implement ASPIRE's complete motion `EnvironmentAdapter` contract:
+G1 gripper geometry, TCP, active
 kinematic model, and camera/depth calibration are not verified. It keeps these
 fields explicitly unset instead of deriving a `CameraObservation` or planning
 scene from incomplete calibration.
@@ -45,6 +46,10 @@ depth scale, depth-to-color registration, or extrinsic frame semantics. The
 capture therefore remains raw evidence; it is not a calibrated
 `CameraObservation` or a metric point cloud.
 
+For the later live RGB-D capture, corrected packet-aware RGB decoding and depth
+startup evidence, see `docs/open-rail-apple-status.md`. Calibration remains
+incomplete.
+
 The Open-RAIL worker did not exit during its five-second graceful-close window
 after this capture; `RobotProxy.close()` terminated it. No robot control,
 reset, home, or gripper call was made. The proxy version's shared-memory
@@ -58,5 +63,8 @@ From an ASPIRE checkout with the Open-RAIL/A2D runtime configured:
 ```bash
 python -m examples.open_rail.observe \
   --open-rail-root third_party/open-rail \
-  --output artifacts/open_rail/observe
+  --output artifacts/open_rail/observe --require-depth
 ```
+
+`--require-depth` skips initial RGB-only frames until the timeout. It does not
+certify RGB-depth registration, metric scale, or synchronization.

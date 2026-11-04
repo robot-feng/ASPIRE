@@ -51,11 +51,20 @@ At the time this provider was checked, the runtime contains both upstream
 checkpoint files (`gen/epoch_736.pth`, 1,210,918,342 bytes;
 `dis/epoch_1056.pth`, 483,889,478 bytes) and their configs under
 `/data/ASPIRE/third_party/models/graspgenx-checkpoints/release`. These are local
-files, not committed provider assets. Model inference has not been run as part
-of the CPU-only checks. Their local SHA-256 digests are `8b55f31cdb8340a573b4df27b027c15cff326bd6debcb389bf631d2aaab7ac44`
+files, not committed provider assets. Their local SHA-256 digests are `8b55f31cdb8340a573b4df27b027c15cff326bd6debcb389bf631d2aaab7ac44`
 and `cbf3f3bdb2e4c03fca8486ed24de0e6a8a859e6bd22bce2f1434a610335abd3e`,
 respectively. The checked upstream tree does not provide expected checkpoint
 digests for comparison.
+
+On this Jetson, `/data/conda-envs/cap-harness-graspgenx` is an isolated
+dependency overlay using the existing NVIDIA Torch 2.4 / CUDA 12.2 build.
+Source its `activate_graspgenx.sh` to configure local assets and caches. An
+offline service/client smoke test on Orin used an official sample point cloud
+and the generic sweep parameters from the upstream README: the service returned
+five candidates in about 5.2 seconds. The request, transforms, scores and service
+log are in `artifacts/open_rail/graspgenx_generic_smoke_20261104/`. That
+descriptor is only a software test; it is not an AgiBot G1 gripper model, and
+the candidates were not checked against a scene or executed.
 
 ## Robot integration boundary
 

@@ -14,6 +14,65 @@ except ImportError as exc:  # pragma: no cover - depends on the Open-RAIL runtim
     ) from exc
 
 
+def _rgb_packet(packet: Any) -> tuple[np.ndarray, dict[str, Any]]:
+    """Decode one matched Cosine color packet to RGB using packet metadata."""
+    import cosine_bus
+
+    if packet.type != cosine_bus.PacketType.IMAGE:
+        raise ValueError(f"unexpected RGB packet type: {packet.type!r}")
+    encoding = packet.encoding_format
+    color_format = packet.color_format
+    width = int(packet.image_width)
+    height = int(packet.image_height)
+    if width <= 0 or height <= 0:
+        raise ValueError("RGB packet has invalid dimensions")
+    if color_format == cosine_bus.ColorFormat.RGB:
+        color_name = "RGB"
+    elif color_format == cosine_bus.ColorFormat.BGR:
+        color_name = "BGR"
+    else:
+        raise ValueError(f"unsupported RGB packet color_format: {color_format!r}")
+
+    payload = packet.get_image_data()
+    if payload is None:
+        raise ValueError("RGB packet has no image payload")
+    if isinstance(payload, np.ndarray):
+        if payload.dtype != np.uint8:
+            raise ValueError("RGB packet payload array is not uint8")
+        encoded = np.ascontiguousarray(payload).reshape(-1)
+    else:
+        try:
+            encoded = np.frombuffer(payload, dtype=np.uint8)
+        except TypeError as exc:
+            raise ValueError("RGB packet payload is not a byte buffer") from exc
+
+    if encoding in (cosine_bus.EncodingFormat.JPEG, cosine_bus.EncodingFormat.PNG):
+        import cv2
+
+        decoded_bgr = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        if decoded_bgr is None or decoded_bgr.shape != (height, width, 3):
+            raise ValueError("compressed RGB packet failed to decode at declared dimensions")
+        rgb = np.ascontiguousarray(decoded_bgr[:, :, ::-1])
+        encoding_name = "JPEG" if encoding == cosine_bus.EncodingFormat.JPEG else "PNG"
+        decoder = "opencv-imdecode-bgr-to-rgb"
+    elif encoding == cosine_bus.EncodingFormat.UNCOMPRESSED:
+        if encoded.size != height * width * 3:
+            raise ValueError("uncompressed RGB payload length does not match its dimensions")
+        raw = encoded.reshape(height, width, 3)
+        rgb = np.ascontiguousarray(raw if color_name == "RGB" else raw[:, :, ::-1])
+        encoding_name = "UNCOMPRESSED"
+        decoder = "raw-rgb" if color_name == "RGB" else "raw-bgr-to-rgb"
+    else:
+        raise ValueError(f"unsupported RGB packet encoding_format: {encoding!r}")
+
+    return rgb, {
+        "rgb_order": "RGB",
+        "rgb_encoding_format": encoding_name,
+        "rgb_color_format": color_name,
+        "rgb_decoder": decoder,
+    }
+
+
 class RobotBody(_OpenRailG1Body):
     """Use one Open-RAIL camera receiver for synchronized RGB, depth and joints.
 
@@ -95,8 +154,28 @@ class RobotBody(_OpenRailG1Body):
 
         rgb_timestamp_ns = int(observation["ref_timestamp"])
         observation["rgb_timestamp_ns"] = rgb_timestamp_ns
-        observation["rgb_order"] = "RGB"
         observation["state_timestamps_ns"] = self._state_timestamps(rgb_timestamp_ns)
+
+        rgb_key = f"cam.{self._rgb_camera_key}"
+        observation.pop(rgb_key, None)
+        try:
+            packet = self.camera.get_packet_nearest(
+                self._camera_names[self._rgb_camera_key], rgb_timestamp_ns
+            )
+            if packet is None:
+                raise ValueError("no RGB packet at the reference timestamp")
+            packet_timestamp_ns = int(packet.send_timestamp)
+            observation["rgb_packet_timestamp_ns"] = packet_timestamp_ns
+            if packet_timestamp_ns != rgb_timestamp_ns:
+                raise ValueError(
+                    "RGB packet timestamp does not match the image reference timestamp"
+                )
+            rgb, rgb_metadata = _rgb_packet(packet)
+            observation[rgb_key] = rgb
+            observation.update(rgb_metadata)
+        except (AttributeError, TypeError, ValueError) as exc:
+            observation["rgb_order"] = "unknown"
+            observation["rgb_error"] = str(exc)
 
         if self._depth_camera_channel is None:
             observation["depth_timestamp_ns"] = None
@@ -133,11 +212,13 @@ class RobotBody(_OpenRailG1Body):
         depth = np.frombuffer(payload, dtype=np.uint16).reshape(height, width).copy()
         depth_timestamp_ns = int(packet.send_timestamp)
         observation[f"cam.{self._depth_camera_key}"] = depth
+        # Open-RAIL's FramePacket passes at most 16 scalar fields. Frame shapes
+        # and depth skew are derivable from the images and timestamps; avoid
+        # duplicating them here so packet encoding/color diagnostics survive.
         observation["depth_timestamp_ns"] = depth_timestamp_ns
-        observation["depth_width"] = width
-        observation["depth_height"] = height
         observation["depth_encoding"] = "RS2_FORMAT_Z16"
-        observation["depth_skew_ns"] = depth_timestamp_ns - rgb_timestamp_ns
+        observation["depth_encoding_format"] = str(packet.encoding_format)
+        observation["depth_color_format"] = str(packet.color_format)
         return observation
 
     def _state_timestamps(self, reference_ns: int) -> dict[str, Any]:

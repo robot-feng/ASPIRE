@@ -62,8 +62,14 @@ image produced one parsed box and a finite 128×128 probability matte in about
 60 seconds; peak RSS was about 14.23 GiB. This is a CPU compatibility smoke
 check, not a quality or field-validation result. The model's generation call
 also reports that `temperature`, `top_p`, and `top_k` may be ignored when
-sampling is disabled. GPU execution, live camera frames, depth association,
-and manipulation remain unverified.
+sampling is disabled. Live camera frames, depth association, and manipulation
+remain unverified.
+
+An additional local HTTP service/client smoke test on Orin GPU processed the
+same historical apple image in about 5.7 seconds and returned one mask. It used
+a saved RGB frame and did not access a camera or establish current scene state.
+Its result and telemetry are in
+`artifacts/open_rail/observe/wevisone/apple_gpu_20261104T123610Z/`.
 
 To reproduce the CPU synthetic probe from the ASPIRE checkout:
 
