@@ -196,6 +196,25 @@ def test_single_gripper_endpoint_preserves_normalized_command() -> None:
         runtime.map_gripper_target("left", 0.4)
 
 
+def test_capability_evidence_must_be_boolean() -> None:
+    with pytest.raises(ValueError, match="must be a bool"):
+        G1CommandCapabilities(arm_terminal_feedback_verified="false")  # type: ignore[arg-type]
+
+
+def test_non_boolean_feedback_does_not_confirm_motion() -> None:
+    class InvalidFeedback(_Feedback):
+        def wait_for_right_arm(self, target_rad, **kwargs):
+            return "true"
+
+    transport = _Transport()
+    runtime = _runtime(transport, InvalidFeedback())
+
+    result = runtime.set_arm("right", np.zeros(7), lifetime_s=0.1, timeout_s=0.2)
+    assert not result.ok and result.error.code is ErrorCode.TIMEOUT
+    assert not runtime.set_gripper("right", 0.5, timeout_s=0.2).ok
+    assert len(transport.calls) == 1
+
+
 def test_proxy_transport_rejects_combined_or_unscoped_joint_groups() -> None:
     class Proxy:
         def command_right_arm(self, target, lifetime):

@@ -23,9 +23,18 @@ class RobotBody(_OpenRailG1Body):
     """
 
     def __init__(self, config: Any) -> None:
-        config.camera.ref = "head"
-        config.camera.names = {"head": "head", "head_depth": "head_depth"}
         super().__init__(config)
+        self._rgb_camera_key = str(self.config.camera.ref)
+        self._camera_names = dict(self.config.camera.names)
+        if self._rgb_camera_key not in self._camera_names:
+            raise ValueError("configured RGB camera ref is missing from camera.names")
+        depth_key = self.config.camera.get("depth_ref", "head_depth")
+        self._depth_camera_key = depth_key if depth_key in self._camera_names else None
+        self._depth_camera_channel = (
+            self._camera_names[self._depth_camera_key]
+            if self._depth_camera_key is not None
+            else None
+        )
         # The upstream receiver can return the raw Z16 image, but its common
         # image path assumes every secondary camera is three-channel color.
         # Read depth by packet below so it remains uint16 and is not color-flipped.
@@ -89,10 +98,17 @@ class RobotBody(_OpenRailG1Body):
         observation["rgb_order"] = "RGB"
         observation["state_timestamps_ns"] = self._state_timestamps(rgb_timestamp_ns)
 
-        packet = self.camera.get_packet_nearest("head_depth", rgb_timestamp_ns)
+        if self._depth_camera_channel is None:
+            observation["depth_timestamp_ns"] = None
+            observation["depth_error"] = "no depth camera is configured"
+            return observation
+
+        packet = self.camera.get_packet_nearest(
+            self._depth_camera_channel, rgb_timestamp_ns
+        )
         if packet is None:
             observation["depth_timestamp_ns"] = None
-            observation["depth_error"] = "no head depth packet near the RGB timestamp"
+            observation["depth_error"] = "no depth packet near the RGB timestamp"
             return observation
 
         import cosine_bus
@@ -116,7 +132,7 @@ class RobotBody(_OpenRailG1Body):
 
         depth = np.frombuffer(payload, dtype=np.uint16).reshape(height, width).copy()
         depth_timestamp_ns = int(packet.send_timestamp)
-        observation["cam.head_depth"] = depth
+        observation[f"cam.{self._depth_camera_key}"] = depth
         observation["depth_timestamp_ns"] = depth_timestamp_ns
         observation["depth_width"] = width
         observation["depth_height"] = height

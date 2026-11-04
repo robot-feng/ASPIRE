@@ -1,4 +1,4 @@
-"""Read-only Open-RAIL embodiment adapter and raw observation boundary."""
+"""Open-RAIL G1 raw observation and scoped command boundary."""
 
 from __future__ import annotations
 
@@ -80,11 +80,11 @@ class OpenRailSnapshot:
 class OpenRailG1ObservationRuntime:
     """Own one G1 Open-RAIL worker and read raw camera/state observations.
 
-    This initial runtime has no actuation methods by design. Open-RAIL's worker
-    and A2D DDS subscriptions are the sole robot/camera owner. The returned
-    snapshot preserves native timestamps and raw Z16 values; it is not converted
-    to ASPIRE's calibrated ``CameraObservation`` until the missing depth scale,
-    registration and camera/base transform have been verified.
+    Open-RAIL's worker and A2D DDS subscriptions are the sole robot/camera
+    owner. The returned snapshot preserves native timestamps and raw Z16 values;
+    it is not converted to ASPIRE's calibrated ``CameraObservation`` until the
+    missing depth scale, registration and camera/base transform are verified.
+    ``command_runtime`` supplies a scoped facade, interlocked by default.
     """
 
     def __init__(
@@ -105,6 +105,14 @@ class OpenRailG1ObservationRuntime:
             if isinstance(profile, str | Path)
             else profile
         )
+        if self.profile.rgb_channel != f"cam.{self.profile.public_camera_key}":
+            raise ValueError("rgb_channel must match cam.<public_camera_key>")
+        if (
+            not self.profile.depth_channel.startswith("cam.")
+            or not self.profile.depth_channel.removeprefix("cam.")
+            or self.profile.depth_channel == self.profile.rgb_channel
+        ):
+            raise ValueError("depth_channel must name a distinct cam.<key>")
         self.maximum_rgb_depth_skew_ms = maximum_rgb_depth_skew_ms
         if type(allow_physical_motion) is not bool:
             raise ValueError("allow_physical_motion must be a bool")
@@ -149,6 +157,7 @@ class OpenRailG1ObservationRuntime:
             self.profile.public_camera_key: self.profile.rgb_channel.removeprefix("cam."),
             self.profile.depth_channel.removeprefix("cam."): self.profile.depth_channel.removeprefix("cam."),
         }
+        config.camera.depth_ref = self.profile.depth_channel.removeprefix("cam.")
         config.allow_physical_motion = self.allow_physical_motion
         return robot_proxy(
             robot_type=self.profile.robot_type,

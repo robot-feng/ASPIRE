@@ -144,6 +144,11 @@ class G1CommandCapabilities:
     gripper_terminal_feedback_verified: bool = False
     gripper_stop_or_hold_verified: bool = False
 
+    def __post_init__(self) -> None:
+        for name in self.__dataclass_fields__:
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a bool")
+
 
 class OpenRailG1CommandRuntime:
     """Translate right-arm/right-gripper requests without unsafe fallbacks.
@@ -182,6 +187,8 @@ class OpenRailG1CommandRuntime:
                 else G1MotionSessionState()
             )
         self._session_state = session_state
+        if capabilities is not None and not isinstance(capabilities, G1CommandCapabilities):
+            raise ValueError("capabilities must be G1CommandCapabilities")
         self.capabilities = capabilities or G1CommandCapabilities()
         self.allow_physical_motion = allow_physical_motion
         self.selected_arm = selected_arm
@@ -361,7 +368,7 @@ class OpenRailG1CommandRuntime:
                     "global_motion_stop_sent": False,
                 },
             )
-        if not reached:
+        if reached is not True:
             self._session_state.mark_uncertain(
                 "right_arm_joint_position", "measured target was not confirmed before timeout"
             )
@@ -430,7 +437,7 @@ class OpenRailG1CommandRuntime:
                     "global_motion_stop_sent": False,
                 },
             )
-        if not reached:
+        if reached is not True:
             self._session_state.mark_uncertain(
                 "right_gripper_position", "measured target was not confirmed before timeout"
             )

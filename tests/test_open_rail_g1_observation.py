@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
+import importlib.util
+from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -29,6 +35,7 @@ class _CommandFeedback:
 
     def wait_for_right_gripper(self, target, **kwargs) -> bool:
         return self.reached
+
 
 def _verified_fake_capabilities() -> G1CommandCapabilities:
     return G1CommandCapabilities(
@@ -73,6 +80,23 @@ def test_g1_profile_exposes_public_head_camera_and_unverified_calibration() -> N
     assert profile.state_dimension == 20
     assert profile.calibration["depth_scale_m_per_unit"] is None
     assert profile.calibration["arm_tcp_transforms"] is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"rgb_channel": "cam.other"}, "rgb_channel"),
+        ({"depth_channel": "cam.head"}, "depth_channel"),
+        ({"depth_channel": "depth"}, "depth_channel"),
+    ],
+)
+def test_runtime_rejects_mismatched_camera_keys(tmp_path, overrides, message) -> None:
+    profile = load_g1_observation_profile(default_g1_observation_profile_path())
+
+    with pytest.raises(ValueError, match=message):
+        OpenRailG1ObservationRuntime(
+            open_rail_root=tmp_path, profile=replace(profile, **overrides), proxy=_Proxy()
+        )
 
 
 def test_runtime_preserves_raw_z16_and_only_claims_configured_timestamp_skew(
@@ -254,3 +278,160 @@ def test_motion_uncertainty_survives_new_facade_reset_and_close(tmp_path) -> Non
     assert reopened_owner.health["motion"]["motion_session"]["uncertain"] is True
     assert len(proxy.commands) == 1
     reopened_owner.close()
+
+
+def test_runtime_passes_profile_camera_key_and_channel_to_fake_proxy(
+    tmp_path, monkeypatch
+) -> None:
+    class AttrConfig(SimpleNamespace):
+        def get(self, key, default=None):
+            return getattr(self, key, default)
+
+    conf_package = ModuleType("conf")
+    conf_package.__path__ = []
+    robots_conf = ModuleType("conf.robots_conf")
+    robots_conf.get_test_config = lambda: AttrConfig(
+        camera=AttrConfig(ref="legacy", names={})
+    )
+    client_package = ModuleType("client")
+    client_package.__path__ = []
+    robots_package = ModuleType("client.robots")
+    robots_package.__path__ = []
+    robot_proxy_module = ModuleType("client.robots.robot_proxy")
+
+    class FakeRobotProxy:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def close(self) -> None:
+            pass
+
+    robot_proxy_module.RobotProxy = FakeRobotProxy
+    monkeypatch.setitem(sys.modules, "conf", conf_package)
+    monkeypatch.setitem(sys.modules, "conf.robots_conf", robots_conf)
+    monkeypatch.setitem(sys.modules, "client", client_package)
+    monkeypatch.setitem(sys.modules, "client.robots", robots_package)
+    monkeypatch.setitem(sys.modules, "client.robots.robot_proxy", robot_proxy_module)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setenv("PYTHONPATH", "")
+
+    profile = replace(
+        load_g1_observation_profile(default_g1_observation_profile_path()),
+        config_factory="conf.robots_conf:get_test_config",
+        public_camera_key="rgb_main",
+        rgb_channel="cam.rgb_main",
+        depth_channel="cam.z16",
+    )
+    runtime = OpenRailG1ObservationRuntime(
+        open_rail_root=tmp_path,
+        profile=profile,
+    )
+
+    config = runtime._proxy.kwargs["config"]
+    assert config.camera.ref == "rgb_main"
+    assert config.camera.names == {"rgb_main": "rgb_main", "z16": "z16"}
+    assert config.camera.depth_ref == "z16"
+    assert config.allow_physical_motion is False
+    runtime.close()
+
+
+def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
+    monkeypatch,
+) -> None:
+    class FakePacket:
+        type = 1
+        color_format = 2
+        image_width = 2
+        image_height = 1
+        send_timestamp = 101
+
+        def get_image_data(self):
+            return np.array([12, 34], dtype=np.uint16).tobytes()
+
+    class FakeCamera:
+        def __init__(self) -> None:
+            self.requested: list[tuple[str, int]] = []
+
+        def get_packet_nearest(self, camera_channel, reference_timestamp):
+            self.requested.append((camera_channel, reference_timestamp))
+            return FakePacket()
+
+    class Buffer:
+        def read_nearest(self, _timestamp):
+            return [0.0], 100
+
+    class FakeRobot:
+        _left_ee_buffer = Buffer()
+        _right_ee_buffer = Buffer()
+
+        def arm_joint_states_nearest(self, timestamp):
+            return [0.0] * 14, timestamp
+
+        def head_joint_states_nearest(self, timestamp):
+            return [0.0, 0.0], timestamp
+
+        def waist_joint_states_nearest(self, timestamp):
+            return [0.0, 0.0], timestamp
+
+    class FakeOpenRailBody:
+        def __init__(self, config) -> None:
+            self.config = config
+            self.camera = FakeCamera()
+            self.robot = FakeRobot()
+
+        def retrieve_observation(self):
+            return {
+                "ref_timestamp": 100,
+                "cam.rgb_main": np.zeros((1, 2, 3), dtype=np.uint8),
+            }
+
+    packages = (
+        "client",
+        "client.robots",
+        "client.robots.agibot_g1",
+    )
+    for name in packages:
+        package = ModuleType(name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, name, package)
+    body_module = ModuleType("client.robots.agibot_g1.body_robot")
+    body_module.RobotBody = FakeOpenRailBody
+    monkeypatch.setitem(sys.modules, "client.robots.agibot_g1.body_robot", body_module)
+    cosine_bus = ModuleType("cosine_bus")
+    cosine_bus.PacketType = SimpleNamespace(IMAGE=1)
+    cosine_bus.ColorFormat = SimpleNamespace(RS2_FORMAT_Z16=2)
+    monkeypatch.setitem(sys.modules, "cosine_bus", cosine_bus)
+
+    body_path = (
+        Path(__file__).resolve().parents[1]
+        / "src/cap_harness/open_rail/g1_body.py"
+    )
+    spec = importlib.util.spec_from_file_location("g1_body_fake_test", body_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class AttrConfig(SimpleNamespace):
+        def get(self, key, default=None):
+            return getattr(self, key, default)
+
+    config = AttrConfig(
+        camera=AttrConfig(
+            ref="rgb_main",
+            names={"rgb_main": "sdk/color", "range_image": "sdk/range"},
+            depth_ref="range_image",
+        )
+    )
+    body = module.RobotBody(config)
+
+    observation = body.retrieve_observation()
+
+    assert body.config.camera.ref == "rgb_main"
+    assert body.config.camera.names == {
+        "rgb_main": "sdk/color",
+        "range_image": "sdk/range",
+    }
+    assert body.camera.requested == [("sdk/range", 100)]
+    np.testing.assert_array_equal(
+        observation["cam.range_image"], np.array([[12, 34]], dtype=np.uint16)
+    )
