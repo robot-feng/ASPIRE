@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import importlib
 import os
@@ -9,10 +10,18 @@ from pathlib import Path
 import sys
 import threading
 import time
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
 
+from cap_harness.open_rail.g1_control import (
+    G1CommandCapabilities,
+    G1CommandFeedback,
+    OpenRailG1CommandRuntime,
+    OpenRailG1ProxyCommandTransport,
+    proxy_motion_session_state,
+)
 from cap_harness.open_rail.profile import (
     G1ObservationProfile,
     default_g1_observation_profile_path,
@@ -22,6 +31,15 @@ from cap_harness.open_rail.profile import (
 
 class OpenRailG1ObservationError(RuntimeError):
     """Open-RAIL G1 observation or configuration failure."""
+
+
+def _plain(value: Any) -> Any:
+    """Convert immutable profile mappings to ordinary artifact metadata."""
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +93,8 @@ class OpenRailG1ObservationRuntime:
         open_rail_root: str | Path,
         profile: G1ObservationProfile | str | Path | None = None,
         maximum_rgb_depth_skew_ms: float | None = None,
+        allow_physical_motion: bool = False,
+        selected_arm: str | None = None,
         proxy: Any | None = None,
     ) -> None:
         self.open_rail_root = Path(open_rail_root).resolve()
@@ -86,10 +106,24 @@ class OpenRailG1ObservationRuntime:
             else profile
         )
         self.maximum_rgb_depth_skew_ms = maximum_rgb_depth_skew_ms
+        if type(allow_physical_motion) is not bool:
+            raise ValueError("allow_physical_motion must be a bool")
+        configured_selected_arm = self.profile.selected_arm
+        if selected_arm is not None and selected_arm != configured_selected_arm:
+            raise ValueError(
+                "selected_arm must match the selected arm in the Open-RAIL profile"
+            )
+        if configured_selected_arm != "right":
+            raise ValueError("this G1 runtime only supports selected_arm='right'")
+        self.allow_physical_motion = allow_physical_motion
+        self.selected_arm = configured_selected_arm
+        self._last_snapshot: OpenRailSnapshot | None = None
+        self._command_runtime: OpenRailG1CommandRuntime | None = None
         if maximum_rgb_depth_skew_ms is not None and maximum_rgb_depth_skew_ms <= 0:
             raise ValueError("maximum_rgb_depth_skew_ms must be positive")
         self._closed = False
         self._proxy = proxy or self._create_proxy()
+        self._motion_session_state = proxy_motion_session_state(self._proxy)
         self._track_proxy_shared_memory()
 
     def _create_proxy(self) -> Any:
@@ -115,6 +149,7 @@ class OpenRailG1ObservationRuntime:
             self.profile.public_camera_key: self.profile.rgb_channel.removeprefix("cam."),
             self.profile.depth_channel.removeprefix("cam."): self.profile.depth_channel.removeprefix("cam."),
         }
+        config.allow_physical_motion = self.allow_physical_motion
         return robot_proxy(
             robot_type=self.profile.robot_type,
             config=config,
@@ -156,10 +191,137 @@ class OpenRailG1ObservationRuntime:
         while True:
             observation = self._proxy.retrieve_observation()
             if observation is not None:
-                return self._decode(observation)
+                snapshot = self._decode(observation)
+                self._last_snapshot = snapshot
+                return snapshot
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"no new Open-RAIL G1 frame within {timeout_s:.1f}s")
             threading.Event().wait(0.005)
+
+    def command_runtime(
+        self,
+        *,
+        feedback: G1CommandFeedback | None = None,
+        capabilities: G1CommandCapabilities | None = None,
+        position_tolerance_rad: float | None = None,
+        velocity_tolerance_rad_s: float | None = None,
+        arm_joint_limits_rad: tuple[tuple[float, float], ...] | None = None,
+        gripper_tolerance: float | None = None,
+    ) -> OpenRailG1CommandRuntime:
+        """Return a scoped command facade over this existing worker only."""
+        if self._closed:
+            raise OpenRailG1ObservationError("G1 observation runtime is closed")
+        self._command_runtime = OpenRailG1CommandRuntime(
+            OpenRailG1ProxyCommandTransport(self._proxy),
+            feedback=feedback,
+            capabilities=capabilities,
+            allow_physical_motion=self.allow_physical_motion,
+            selected_arm=self.selected_arm,
+            position_tolerance_rad=position_tolerance_rad,
+            velocity_tolerance_rad_s=velocity_tolerance_rad_s,
+            arm_joint_limits_rad=arm_joint_limits_rad,
+            gripper_tolerance=gripper_tolerance,
+            session_state=self._motion_session_state,
+        )
+        return self._command_runtime
+
+    @property
+    def health(self) -> MappingProxyType:
+        """Read-only profile, camera, calibration, and worker health evidence."""
+        process = getattr(self._proxy, "_process", None)
+        alive_fn = getattr(process, "is_alive", None)
+        worker_alive = None if not callable(alive_fn) else bool(alive_fn())
+        calibration = dict(self.profile.calibration)
+        camera = dict(self.profile.camera)
+        arm_profiles = self.profile.arms
+        control_profile = self.profile.control
+        selected_arm_profile = arm_profiles.get(self.selected_arm)
+        if not isinstance(selected_arm_profile, Mapping):
+            selected_arm_profile = MappingProxyType({})
+        camera_calibration = MappingProxyType(
+            {
+                "intrinsics_file": calibration.get("camera_intrinsics")
+                or camera.get("color_intrinsics_file"),
+                "intrinsics_values": camera.get("camera_intrinsics"),
+                "intrinsics_resolution": camera.get("intrinsics_resolution"),
+                "extrinsics_file": calibration.get("camera_extrinsics")
+                or camera.get("camera_extrinsics_file"),
+                "extrinsics_semantics": camera.get("camera_extrinsics_semantics"),
+                "depth_scale_m_per_unit": camera.get("depth_scale_m_per_unit")
+                if camera.get("depth_scale_m_per_unit") is not None
+                else calibration.get("depth_scale_m_per_unit"),
+                "depth_registered_to_rgb": camera.get("depth_registered_to_rgb")
+                if camera.get("depth_registered_to_rgb") is not None
+                else calibration.get("depth_registered_to_rgb"),
+                "depth_to_rgb_calibration": camera.get("depth_to_rgb_calibration")
+                if camera.get("depth_to_rgb_calibration") is not None
+                else calibration.get("depth_to_rgb_calibration"),
+            }
+        )
+        tcp_transform = selected_arm_profile.get("tcp_transform")
+        if tcp_transform is None:
+            tcp_transform = self.profile.gripper.get("tcp_transform")
+        calibration_values = {
+            "camera_intrinsics_values": camera_calibration["intrinsics_values"],
+            "camera_intrinsics_resolution": camera_calibration["intrinsics_resolution"],
+            "camera_extrinsics_semantics": camera_calibration["extrinsics_semantics"],
+            "depth_scale_m_per_unit": camera_calibration["depth_scale_m_per_unit"],
+            "depth_registered_to_rgb": camera_calibration["depth_registered_to_rgb"],
+            "depth_to_rgb_calibration": camera_calibration["depth_to_rgb_calibration"],
+            "base_frame": calibration.get("base_frame"),
+            "base_pose": calibration.get("base_pose"),
+            "arm_tcp_transform": tcp_transform,
+        }
+        calibration_gaps = tuple(
+            key for key, value in calibration_values.items() if value is None
+        )
+        calibration_verified = calibration.get("verified") is True
+        if not calibration_verified:
+            calibration_gaps += ("calibration_verification",)
+        snapshot = self._last_snapshot
+        command_health = (
+            self._command_runtime.health
+            if self._command_runtime is not None
+            else MappingProxyType(
+                {
+                    "selected_arm": self.selected_arm,
+                    "allowed_commands": ("right_arm_joint_position", "right_gripper_position"),
+                    "physical_motion_authorized": self.allow_physical_motion,
+                    "motion_ready": False,
+                    "blockers": ("command feedback/capabilities have not been configured",),
+                    "global_motion_stop_used": False,
+                    "motion_session": self._motion_session_state.health,
+                }
+            )
+        )
+        return MappingProxyType(
+            {
+                "profile": self.profile.name,
+                "robot_type": self.profile.robot_type,
+                "proxy_worker_alive": worker_alive,
+                "runtime_closed": self._closed,
+                "selected_arm": self.selected_arm,
+                "public_camera_key": self.profile.public_camera_key,
+                "control_constraints": MappingProxyType(
+                    {
+                        "selected_arm": self.selected_arm,
+                        "allowed_commands": tuple(control_profile["allowed_commands"]),
+                        "read_only_parts": tuple(control_profile["read_only_parts"]),
+                        "right_arm_group": "right_arm",
+                        "right_gripper_topic": "/wbc/right_ee_command",
+                    }
+                ),
+                "selected_arm_profile": selected_arm_profile,
+                "arm_tcp_transform": tcp_transform,
+                "camera_calibration": camera_calibration,
+                "raw_snapshot_available": snapshot is not None,
+                "depth_available": snapshot is not None and snapshot.depth_u16 is not None,
+                "calibration_complete": calibration_verified and not calibration_gaps,
+                "calibration_gaps": calibration_gaps,
+                "calibration": MappingProxyType(calibration),
+                "motion": command_health,
+            }
+        )
 
     def _decode(self, observation: dict[str, Any]) -> OpenRailSnapshot:
         rgb = np.asarray(observation.get(self.profile.rgb_channel))
@@ -195,7 +357,7 @@ class OpenRailG1ObservationRuntime:
         rgb_timestamp = int(raw_rgb_timestamp)
         raw_depth_stamp = observation.get("depth_timestamp_ns")
         depth_timestamp = None if raw_depth_stamp is None else int(raw_depth_stamp)
-        calibration = dict(self.profile.calibration)
+        calibration = _plain(self.profile.calibration)
         metadata = {
             "profile": self.profile.name,
             "robot_type": self.profile.robot_type,

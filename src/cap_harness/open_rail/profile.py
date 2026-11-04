@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+
+
+def _freeze(value: object) -> object:
+    """Recursively freeze profile data before exposing it as runtime health."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _freeze_mapping(value: dict[str, object]) -> Mapping[str, object]:
+    return MappingProxyType({key: _freeze(item) for key, item in value.items()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,9 +36,14 @@ class G1ObservationProfile:
     public_camera_key: str
     rgb_channel: str
     depth_channel: str
+    selected_arm: str
     state_dimension: int
     state_layout: Mapping[str, object]
     calibration: Mapping[str, object]
+    camera: Mapping[str, object]
+    arms: Mapping[str, object]
+    gripper: Mapping[str, object]
+    control: Mapping[str, object]
 
 
 def load_g1_observation_profile(path: str | Path) -> G1ObservationProfile:
@@ -42,6 +60,7 @@ def load_g1_observation_profile(path: str | Path) -> G1ObservationProfile:
     runtime = raw.get("runtime") or {}
     camera = raw.get("camera") or {}
     state = raw.get("state") or {}
+    control = raw.get("control") or {}
     required = {
         "name": raw.get("name"),
         "robot_type": raw.get("robot_type"),
@@ -74,6 +93,23 @@ def load_g1_observation_profile(path: str | Path) -> G1ObservationProfile:
     calibration = raw.get("calibration") or {}
     if not isinstance(calibration, dict):
         raise ValueError("Open-RAIL profile calibration must be a mapping")
+    arms = raw.get("arms") or {}
+    gripper = raw.get("gripper") or {}
+    if not isinstance(arms, dict):
+        raise ValueError("Open-RAIL profile arms must be a mapping")
+    if not isinstance(gripper, dict):
+        raise ValueError("Open-RAIL profile gripper must be a mapping")
+    if not isinstance(control, dict):
+        raise ValueError("Open-RAIL profile control must be a mapping")
+    selected_arm = control.get("selected_arm")
+    if not isinstance(selected_arm, str) or selected_arm not in arms:
+        raise ValueError("Open-RAIL profile control.selected_arm must name a configured arm")
+    allowed_commands = control.get("allowed_commands")
+    if allowed_commands != ["right_arm_joint_position", "right_gripper_position"]:
+        raise ValueError("G1 profile may allow only right-arm and right-gripper commands")
+    read_only_parts = control.get("read_only_parts")
+    if read_only_parts != ["left_arm", "head", "waist", "torso", "base"]:
+        raise ValueError("G1 profile must keep the left arm, head, waist, torso, and base read-only")
     return G1ObservationProfile(
         name=required["name"],
         robot_type=required["robot_type"],
@@ -82,9 +118,14 @@ def load_g1_observation_profile(path: str | Path) -> G1ObservationProfile:
         public_camera_key=required["public_camera_key"],
         rgb_channel=required["rgb_channel"],
         depth_channel=required["depth_channel"],
+        selected_arm=selected_arm,
         state_dimension=dimension,
-        state_layout=MappingProxyType(dict(layout)),
-        calibration=MappingProxyType(dict(calibration)),
+        state_layout=_freeze_mapping(layout),
+        calibration=_freeze_mapping(calibration),
+        camera=_freeze_mapping(camera),
+        arms=_freeze_mapping(arms),
+        gripper=_freeze_mapping(gripper),
+        control=_freeze_mapping(control),
     )
 
 

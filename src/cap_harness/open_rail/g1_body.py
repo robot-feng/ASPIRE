@@ -30,6 +30,54 @@ class RobotBody(_OpenRailG1Body):
         # image path assumes every secondary camera is three-channel color.
         # Read depth by packet below so it remains uint16 and is not color-flipped.
         self._non_ref_cameras = []
+        self._right_arm_controller = None
+
+    def _require_physical_motion(self) -> None:
+        if self.config.get("allow_physical_motion", False) is not True:
+            raise PermissionError("G1 physical commands are disabled by the runtime profile")
+
+    def command_right_arm(self, positions_rad: list[float], lifetime_s: float) -> None:
+        """Publish only the WBC right-arm joint group; never compose a 14-joint target."""
+        self._require_physical_motion()
+        target = np.asarray(positions_rad, dtype=np.float64)
+        lifetime = float(lifetime_s)
+        if target.shape != (7,) or not np.all(np.isfinite(target)):
+            raise ValueError("right-arm target must contain seven finite radians")
+        if not np.isfinite(lifetime) or lifetime <= 0.0:
+            raise ValueError("joint command lifetime must be positive and finite")
+        if self._right_arm_controller is None:
+            from a2d_sdk.robot import RobotController
+
+            self._right_arm_controller = RobotController()
+        self._right_arm_controller.set_joint_position_control(
+            lifetime, {"right_arm": target.tolist()}
+        )
+
+    def command_right_gripper(self, position: float) -> None:
+        """Publish one normalized command to the dedicated right endpoint topic."""
+        self._require_physical_motion()
+        if isinstance(position, bool):
+            raise ValueError("right gripper target must be finite and in [0, 1]")
+        value = float(position)
+        if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("right gripper target must be finite and in [0, 1]")
+        from sensor_msgs_pb.msg.JointState_pb2 import JointState
+
+        command = JointState()
+        command.position.append(value)
+        self.robot._right_ee_cmd_publisher.publish(command)
+
+    def execute_action(self, data: Any) -> None:
+        raise PermissionError("generic Open-RAIL action can command unscoped robot parts")
+
+    def control_robot(self, data: Any) -> None:
+        raise PermissionError("generic Open-RAIL control can command unscoped robot parts")
+
+    def _control_robot(self, data: Any) -> None:
+        raise PermissionError("manual Open-RAIL control is disabled for the G1 profile")
+
+    def reset_robot(self, *args: Any, **kwargs: Any) -> None:
+        raise PermissionError("physical G1 reset is disabled; adapter reset is observational")
 
     def retrieve_observation(self) -> dict[str, Any] | None:
         observation = super().retrieve_observation()

@@ -7,6 +7,11 @@ runtime:
   robot_module: cap_harness.open_rail.g1_body
   config_factory: conf.robots_conf:get_agibot_g1_config
 
+control:
+  selected_arm: right
+  allowed_commands: [right_arm_joint_position, right_gripper_position]
+  read_only_parts: [left_arm, head, waist, torso, base]
+
 # Confirmed from Open-RAIL RobotDds.arm_joint_names in order. Angles are radians.
 # These arm joints and grippers are the only command channels; the head/waist
 # values below are observation-only.
