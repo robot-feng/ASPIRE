@@ -16,6 +16,15 @@ calibration when cameras observe it simultaneously. Camera intrinsics alone do
 not determine the camera-to-robot-base transform or the depth sensor's scale
 and alignment; those require additional verified measurements.
 
+For a camera mounted on the moving head, calibrate the fixed transform from the
+camera to its mounting link, then compose it with the mounting link's forward
+kinematics at the image timestamp. Recalibration is not required for every head
+pose. The dynamic G1 conversion accepts an explicitly verified kinematics
+provider and mount transform, but remains unavailable for the actual robot until
+its model, camera mounting link and transform, and synchronized joint-state
+timestamps are verified. The right gripper's flange-to-TCP transform also needs
+independent verification.
+
 The pattern was generated with OpenCV's ChArUco implementation. See the
 [OpenCV calibration pattern documentation](https://docs.opencv.org/4.x/da/d0d/tutorial_camera_calibration_pattern.html)
 and [ENPIRE's calibration-board guide](https://github.com/NVlabs/ENPIRE/blob/main/enpire/env/docs/CALIBRATION_BOARD.md).

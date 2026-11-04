@@ -121,8 +121,22 @@ def test_runtime_preserves_raw_z16_and_only_claims_configured_timestamp_skew(
     assert snapshot.is_synchronized
     assert snapshot.metadata["public_camera_key"] == "head"
     assert snapshot.metadata["calibration"]["depth_scale_m_per_unit"] is None
+    assert snapshot.metadata["state_timestamps_bind_state_values"] is False
     assert not snapshot.rgb.flags.writeable
     assert not snapshot.depth_u16.flags.writeable
+    adapter.close()
+
+
+def test_runtime_only_preserves_explicit_state_timestamp_binding_claim(tmp_path) -> None:
+    adapter = OpenRailG1ObservationRuntime(open_rail_root=tmp_path, proxy=_Proxy())
+    observation = _observation()
+
+    unbound = adapter._decode(observation)
+    observation["state_timestamps_bind_state_values"] = True
+    bound = adapter._decode(observation)
+
+    assert unbound.metadata["state_timestamps_bind_state_values"] is False
+    assert bound.metadata["state_timestamps_bind_state_values"] is True
     adapter.close()
 
 
@@ -354,12 +368,18 @@ def test_runtime_passes_profile_camera_key_and_channel_to_fake_proxy(
     runtime = OpenRailG1ObservationRuntime(
         open_rail_root=tmp_path,
         profile=profile,
+        calibration_camera_keys=("head_left_fisheye",),
     )
 
     config = runtime._proxy.kwargs["config"]
     assert config.camera.ref == "rgb_main"
-    assert config.camera.names == {"rgb_main": "rgb_main", "z16": "z16"}
+    assert config.camera.names == {
+        "rgb_main": "rgb_main",
+        "z16": "z16",
+        "head_left_fisheye": "head_left_fisheye",
+    }
     assert config.camera.depth_ref == "z16"
+    assert config.camera.calibration_camera_keys == ["head_left_fisheye"]
     assert config.camera.color_order == "rgb"
     assert config.allow_physical_motion is False
     runtime.close()
@@ -469,8 +489,13 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     config = AttrConfig(
         camera=AttrConfig(
             ref="rgb_main",
-            names={"rgb_main": "sdk/color", "range_image": "sdk/range"},
+            names={
+                "rgb_main": "sdk/color",
+                "range_image": "sdk/range",
+                "fisheye": "sdk/fisheye",
+            },
             depth_ref="range_image",
+            calibration_camera_keys=["fisheye"],
         )
     )
     body = module.RobotBody(config)
@@ -481,6 +506,7 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     assert body.config.camera.names == {
         "rgb_main": "sdk/color",
         "range_image": "sdk/range",
+        "fisheye": "sdk/fisheye",
     }
     assert body.camera.requested == [("sdk/color", 100), ("sdk/range", 100)]
     np.testing.assert_array_equal(
@@ -551,3 +577,19 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     unknown = body.retrieve_observation()
     assert "cam.rgb_main" not in unknown
     assert "unsupported RGB packet encoding_format" in unknown["rgb_error"]
+
+    body.camera.rgb_packet = FakePacket(
+        timestamp=100,
+        color_format=1,
+        encoding_format=3,
+        payload=bytes([1, 2, 3, 4, 5, 6]),
+    )
+    capture = body.capture_calibration_packets(["rgb_main", "fisheye"], 100)
+    assert [record["metadata"]["camera_key"] for record in capture] == [
+        "rgb_main",
+        "fisheye",
+    ]
+    assert capture[0]["metadata"]["packet_timestamp_ns"] == 100
+    assert capture[1]["metadata"]["packet_timestamp_ns"] == 101
+    assert capture[1]["metadata"]["sdk_channel"] == "sdk/fisheye"
+    assert body.camera.requested[-2:] == [("sdk/color", 100), ("sdk/fisheye", 100)]

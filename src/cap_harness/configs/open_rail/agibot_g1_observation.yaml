@@ -42,6 +42,11 @@ camera:
   public_camera_key: head
   rgb_channel: cam.head
   depth_channel: cam.head_depth
+  # Explicitly opted-in raw calibration channels. They are subscribed by the
+  # same Cosine camera owner and never added to ordinary RGB-D observations.
+  calibration_channels:
+    head_left_fisheye: head_left_fisheye
+    head_right_fisheye: head_right_fisheye
   sdk_rgb_order: BGR
   open_rail_rgb_order: RGB
   reference_camera_config: /home/agi/app/conf/deploy/camera_copilot/rs_camera_conf_53.json

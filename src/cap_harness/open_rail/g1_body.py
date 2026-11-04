@@ -147,6 +147,37 @@ class RobotBody(_OpenRailG1Body):
     def reset_robot(self, *args: Any, **kwargs: Any) -> None:
         raise PermissionError("physical G1 reset is disabled; adapter reset is observational")
 
+    def capture_calibration_packets(
+        self, camera_keys: list[str], reference_timestamp_ns: int
+    ) -> list[dict[str, Any]]:
+        """Fetch raw packets via this body's existing Cosine camera owner only."""
+        if self.config.get("allow_physical_motion", False) is not False:
+            raise PermissionError("raw calibration capture requires a read-only G1 runtime")
+        configured_keys = self.config.camera.get("calibration_camera_keys", [])
+        allowed_keys = {self._rgb_camera_key, *configured_keys}
+        if any(key not in allowed_keys for key in camera_keys):
+            raise ValueError("calibration request includes a camera not enabled in this profile")
+
+        import cosine_bus
+
+        from cap_harness.open_rail.g1_calibration_capture import capture_raw_camera_packets
+
+        records = capture_raw_camera_packets(
+            self.camera,
+            self._camera_names,
+            camera_keys,
+            reference_timestamp_ns,
+            image_packet_type=cosine_bus.PacketType.IMAGE,
+        )
+        for record in records:
+            metadata = record["metadata"]
+            if (
+                metadata["camera_key"] == self._rgb_camera_key
+                and metadata["packet_timestamp_ns"] != reference_timestamp_ns
+            ):
+                raise ValueError("head RGB packet timestamp differs from the snapshot reference")
+        return records
+
     def retrieve_observation(self) -> dict[str, Any] | None:
         observation = super().retrieve_observation()
         if observation is None:

@@ -129,12 +129,14 @@ class PlanResponse(BaseModel):
     joint_positions_base64: str
     dt_s: float
     attachment_diagnostics: dict[str, Any] | None = None
+    collision_diagnostics: dict[str, bool]
 
 
 class SynchronizedPlanResponse(BaseModel):
     joint_positions_base64: dict[str, str]
     dt_s: float
     attachment_diagnostics: dict[str, Any] | None = None
+    collision_diagnostics: dict[str, bool]
 
 
 @functools.lru_cache(maxsize=1)
@@ -365,6 +367,25 @@ def _attachment_diagnostics(request: BaseRequest) -> dict[str, Any] | None:
         "contact_links_ignored_for_self_collision": list(
             request.attached_object.contact_link_names
         ),
+    }
+
+
+def _collision_diagnostics(request: BaseRequest) -> dict[str, bool]:
+    """Acknowledge collision checks actually enabled for this successful request.
+
+    Callers add this to a plan response only after ``_planner`` succeeds. When
+    collision checking is enabled, a supplied scene has then passed decoding,
+    finite/non-empty checks, workspace filtering, and scene-mesh construction.
+    A request without points may still be planned against robot self-collision,
+    but it has no world-collision guarantee.
+    """
+    disabled = _collision_disabled(request.model)
+    scene_supplied = request.scene_points_base64 is not None
+    return {
+        "collision_disabled": disabled,
+        "scene_supplied": scene_supplied,
+        "world_collision_check_enabled": not disabled and scene_supplied,
+        "self_collision_check_enabled": not disabled,
     }
 
 
@@ -1321,6 +1342,7 @@ def _plan(request: PlanRequest) -> PlanResponse:
         joint_positions_base64=encode_numpy(positions[:, indices]),
         dt_s=dt,
         attachment_diagnostics=_attachment_diagnostics(request),
+        collision_diagnostics=_collision_diagnostics(request),
     )
 
 
@@ -1345,6 +1367,7 @@ def _plan_synchronized(request: SynchronizedPlanRequest) -> SynchronizedPlanResp
         joint_positions_base64=output,
         dt_s=dt,
         attachment_diagnostics=_attachment_diagnostics(request),
+        collision_diagnostics=_collision_diagnostics(request),
     )
 
 

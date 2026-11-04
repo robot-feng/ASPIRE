@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import importlib
 import os
@@ -95,6 +95,7 @@ class OpenRailG1ObservationRuntime:
         maximum_rgb_depth_skew_ms: float | None = None,
         allow_physical_motion: bool = False,
         selected_arm: str | None = None,
+        calibration_camera_keys: Sequence[str] = (),
         proxy: Any | None = None,
     ) -> None:
         self.open_rail_root = Path(open_rail_root).resolve()
@@ -123,6 +124,23 @@ class OpenRailG1ObservationRuntime:
             )
         if configured_selected_arm != "right":
             raise ValueError("this G1 runtime only supports selected_arm='right'")
+        if isinstance(calibration_camera_keys, (str, bytes)):
+            raise ValueError("calibration_camera_keys must be a sequence of camera keys")
+        camera_keys = tuple(calibration_camera_keys)
+        available_channels = self.profile.camera.get("calibration_channels", {})
+        if not isinstance(available_channels, Mapping):
+            raise ValueError("profile camera.calibration_channels must be a mapping")
+        if len(set(camera_keys)) != len(camera_keys):
+            raise ValueError("calibration_camera_keys must be unique")
+        for key in camera_keys:
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("calibration_camera_keys must contain non-empty strings")
+            if key not in available_channels:
+                raise ValueError(f"camera {key!r} is not enabled by this G1 profile")
+            channel = available_channels[key]
+            if not isinstance(channel, str) or not channel.strip():
+                raise ValueError(f"profile camera channel for {key!r} must be non-empty")
+        self.calibration_camera_keys = tuple(key.strip() for key in camera_keys)
         self.allow_physical_motion = allow_physical_motion
         self.selected_arm = configured_selected_arm
         self._last_snapshot: OpenRailSnapshot | None = None
@@ -157,6 +175,15 @@ class OpenRailG1ObservationRuntime:
             self.profile.public_camera_key: self.profile.rgb_channel.removeprefix("cam."),
             self.profile.depth_channel.removeprefix("cam."): self.profile.depth_channel.removeprefix("cam."),
         }
+        calibration_channels = self.profile.camera.get("calibration_channels", {})
+        for key in self.calibration_camera_keys:
+            channel = calibration_channels[key]
+            if key in config.camera.names or channel in config.camera.names.values():
+                raise OpenRailG1ObservationError(
+                    f"calibration camera {key!r} duplicates an existing camera mapping"
+                )
+            config.camera.names[key] = channel
+        config.camera.calibration_camera_keys = list(self.calibration_camera_keys)
         config.camera.depth_ref = self.profile.depth_channel.removeprefix("cam.")
         # G1RobotBody returns RGB only after checking packet encoding and
         # color_format. Keep downstream Open-RAIL image encoding aligned.
@@ -219,6 +246,27 @@ class OpenRailG1ObservationRuntime:
                 needed = "RGB-D frame" if require_depth else "frame"
                 raise TimeoutError(f"no new Open-RAIL G1 {needed} within {timeout:.1f}s")
             threading.Event().wait(0.005)
+
+    def capture_calibration_packets(self, *, timeout_s: float = 5.0) -> list[dict[str, Any]]:
+        """Capture raw head RGB plus selected fisheye packets from this worker."""
+        if self._closed:
+            raise OpenRailG1ObservationError("G1 observation runtime is closed")
+        if self.allow_physical_motion:
+            raise OpenRailG1ObservationError(
+                "camera calibration capture requires a read-only runtime"
+            )
+        if not self.calibration_camera_keys:
+            raise OpenRailG1ObservationError(
+                "select at least one calibration_camera_key when creating the runtime"
+            )
+        snapshot = self.read_snapshot(timeout_s=timeout_s)
+        capture = getattr(self._proxy, "capture_calibration_packets", None)
+        if not callable(capture):
+            raise OpenRailG1ObservationError(
+                "Open-RAIL worker does not expose raw calibration packet capture"
+            )
+        camera_keys = [self.profile.public_camera_key, *self.calibration_camera_keys]
+        return capture(camera_keys, snapshot.rgb_timestamp_ns)
 
     def command_runtime(
         self,
@@ -423,6 +471,11 @@ class OpenRailG1ObservationRuntime:
             "depth_scale_m_per_unit": calibration.get("depth_scale_m_per_unit"),
             "depth_registered_to_rgb": calibration.get("depth_registered_to_rgb"),
             "state_layout": dict(self.profile.state_layout),
+            # False by default: a body may set this only when the state values
+            # and their per-group timestamps came from the same DDS samples.
+            "state_timestamps_bind_state_values": (
+                observation.get("state_timestamps_bind_state_values") is True
+            ),
             "calibration": calibration,
             "maximum_rgb_depth_skew_ms": self.maximum_rgb_depth_skew_ms,
         }

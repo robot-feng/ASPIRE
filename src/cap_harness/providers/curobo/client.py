@@ -89,6 +89,50 @@ def _validate_attachment_ack(
         raise ValueError("cuRobo attachment diagnostics did not acknowledge caller-supplied spheres")
 
 
+def _collision_acknowledged(
+    response: Mapping[str, object],
+    *,
+    attached_object: AttachedObjectGeometry | None,
+    strict: bool,
+) -> bool | None:
+    """Return enabled status, retaining legacy no-attachment service support.
+
+    ``None`` means an older service omitted the new acknowledgement. That is
+    accepted only for non-strict, unattached planning. Explicitly disabled
+    checks are never reported as collision-aware, even in compatibility mode.
+    """
+    diagnostics = response.get("collision_diagnostics")
+    required = strict or attached_object is not None
+    if diagnostics is None:
+        if required:
+            raise ValueError("cuRobo response omitted collision diagnostics")
+        return None
+    if not isinstance(diagnostics, Mapping):
+        raise ValueError("cuRobo collision diagnostics must be a mapping")
+
+    fields = (
+        "collision_disabled",
+        "scene_supplied",
+        "world_collision_check_enabled",
+        "self_collision_check_enabled",
+    )
+    if any(type(diagnostics.get(name)) is not bool for name in fields):
+        raise ValueError("cuRobo collision diagnostics are missing boolean check acknowledgements")
+    disabled = diagnostics["collision_disabled"]
+    scene_supplied = diagnostics["scene_supplied"]
+    world_enabled = diagnostics["world_collision_check_enabled"]
+    self_enabled = diagnostics["self_collision_check_enabled"]
+    if world_enabled and not scene_supplied:
+        raise ValueError("cuRobo acknowledged world collision checking without a scene")
+
+    enabled = not disabled and scene_supplied and world_enabled and self_enabled
+    if not enabled and required:
+        raise ValueError(
+            "cuRobo did not acknowledge enabled world and self collision checks with a scene"
+        )
+    return enabled
+
+
 PANDA_EEF_TO_HAND_OFFSET_M = np.array([0.0, 0.0, -0.1], dtype=np.float64)
 # cuRobo times trajectories to the real Panda's joint-speed limits; the sim's
 # plan-tracking controller cannot follow that timing. Stretch plans to this
@@ -111,13 +155,17 @@ class CuRoboProvider:
         retry_backoff_s: float = 0.25,
         control_period_s: float = 0.05,
         time_dilation: float = DEFAULT_TIME_DILATION,
+        strict_collision_ack: bool = False,
         session: requests.Session | None = None,
     ) -> None:
         if not np.isfinite(control_period_s) or control_period_s <= 0.0:
             raise ValueError("control_period_s must be positive and finite")
         if not np.isfinite(time_dilation) or not 0.0 < time_dilation <= 1.0:
             raise ValueError("time_dilation must be in (0, 1]")
+        if type(strict_collision_ack) is not bool:
+            raise ValueError("strict_collision_ack must be a bool")
         self.time_dilation = float(time_dilation)
+        self.strict_collision_ack = strict_collision_ack
         self._http = HttpProviderClient(
             base_url,
             timeout_s=timeout_s,
@@ -298,6 +346,11 @@ class CuRoboProvider:
         try:
             response = self._http.post_json(PLAN_PATH, payload)
             _validate_attachment_ack(response, attached_object)
+            collision_ack = _collision_acknowledged(
+                response,
+                attached_object=attached_object,
+                strict=self.strict_collision_ack,
+            )
             raw = decode_numpy(response.get("joint_positions_base64"))
             source_dt = float(response.get("dt_s"))
             waypoints = self._resample(
@@ -314,7 +367,9 @@ class CuRoboProvider:
                 dt_s=self.control_period_s,
                 joint_names=robot_state.joint_names[arm],
                 planner=f"curobo_v2_{planning_mode}",
-                collision_aware=True,
+                # A missing ACK is legacy-compatible only for unattached,
+                # non-strict callers. An explicit negative ACK is never true.
+                collision_aware=collision_ack is not False,
                 expected_start=robot_state,
                 arm=arm,
                 gripper_positions=np.full(len(waypoints), gripper),
@@ -338,7 +393,12 @@ class CuRoboProvider:
             "interpolation_dt_s": interpolation_dt_s,
             "maximum_trajectory_dt_s": maximum_trajectory_dt_s,
             "scene_points": len(scene.point_cloud.points),
+            "collision_acknowledged": collision_ack is not None,
         }
+        if collision_ack is not None:
+            diagnostics["collision_aware"] = collision_ack
+        else:
+            diagnostics["collision_ack_status"] = "legacy_service_unknown"
         diagnostics.update(_attachment_diagnostics(attached_object))
         return PlanResult(
             ok=True,
@@ -401,6 +461,11 @@ class CuRoboProvider:
         try:
             response = self._http.post_json(PLAN_SYNCHRONIZED_PATH, payload)
             _validate_attachment_ack(response, attached_object)
+            collision_ack = _collision_acknowledged(
+                response,
+                attached_object=attached_object,
+                strict=self.strict_collision_ack,
+            )
             source_dt = float(response.get("dt_s"))
             encoded = response.get("joint_positions_base64")
             if not isinstance(encoded, Mapping) or set(encoded) != set(targets):
@@ -423,7 +488,7 @@ class CuRoboProvider:
                 dt_s=self.control_period_s,
                 joint_names={arm: robot_state.joint_names[arm] for arm in targets},
                 planner="curobo_v2",
-                collision_aware=True,
+                collision_aware=collision_ack is not False,
                 expected_start=robot_state,
                 embodiment=robot_state.embodiment,
                 gripper_positions={
@@ -446,7 +511,12 @@ class CuRoboProvider:
             "time_dilation": dilation,
             "interpolation_dt_s": interpolation_dt_s,
             "maximum_trajectory_dt_s": maximum_trajectory_dt_s,
+            "collision_acknowledged": collision_ack is not None,
         }
+        if collision_ack is not None:
+            diagnostics["collision_aware"] = collision_ack
+        else:
+            diagnostics["collision_ack_status"] = "legacy_service_unknown"
         diagnostics.update(_attachment_diagnostics(attached_object))
         return SynchronizedPlanResult(
             ok=True,
