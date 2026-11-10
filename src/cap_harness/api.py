@@ -243,6 +243,25 @@ class CapApi:
             )
         return state
 
+    def partition_target_scene(
+        self,
+        observation: Observation,
+        localization: LocalizationResult,
+        *,
+        camera_name: str,
+        max_camera_state_skew_s: float,
+        voxel_size_m: float = 0.01,
+    ) -> object:
+        """Separate a bound Open-RAIL target mask from observed scene pixels."""
+        if not self._embodiment.startswith("open_rail_"):
+            raise ValueError("target-scene partition is supported only for Open-RAIL")
+        from .open_rail.scene_partition import partition_target_scene
+
+        return partition_target_scene(
+            observation, localization, camera_name=camera_name,
+            max_camera_state_skew_s=max_camera_state_skew_s, voxel_size_m=voxel_size_m,
+        )
+
     def segment_text(
         self,
         camera_name: str,
@@ -704,6 +723,7 @@ class CapApi:
         planning_scene: PlanningScene | None = None,
         robot_state: RobotState | None = None,
         attached_object: object | None = None,
+        target_scene_partition: object | None = None,
     ) -> PlanResult:
         """Plan one arm; an attachment requires a supporting collision planner.
 
@@ -751,6 +771,19 @@ class CapApi:
                 ErrorCode.INVALID_REQUEST,
                 "planning_scene must be a PlanningScene or None",
             )
+        if target_scene_partition is not None:
+            if not self._embodiment.startswith("open_rail_") or attached_object is None or planning_scene is None:
+                return self._plan_failure(
+                    ErrorCode.INVALID_REQUEST,
+                    "a target-scene partition requires Open-RAIL, an attachment and an explicit scene",
+                )
+            from .open_rail.scene_partition import verify_target_scene_partition
+
+            try:
+                verify_target_scene_partition(target_scene_partition, planning_scene)
+            except (TypeError, ValueError) as exc:
+                return self._plan_failure(ErrorCode.INVALID_REQUEST, str(exc))
+            attachment_options["target_scene_partition"] = target_scene_partition
         if robot_state is not None and not isinstance(robot_state, RobotState):
             return self._plan_failure(
                 ErrorCode.INVALID_REQUEST,
@@ -813,6 +846,8 @@ class CapApi:
                 )
             if attachment_options and getattr(provider, "supports_attached_objects", False) is not True:
                 return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support attachments")
+            if target_scene_partition is not None and getattr(provider, "supports_target_scene_partition", False) is not True:
+                return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support target-scene partitions")
             planning_goal = goal
             adapter_transform = getattr(self._adapter, "ik_request", None)
             if callable(adapter_transform):
@@ -884,6 +919,8 @@ class CapApi:
                 )
             if attachment_options and getattr(provider, "supports_attached_objects", False) is not True:
                 return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support attachments")
+            if target_scene_partition is not None and getattr(provider, "supports_target_scene_partition", False) is not True:
+                return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support target-scene partitions")
             try:
                 result = provider.plan_to_joints(
                     planning_state,
@@ -1994,6 +2031,7 @@ class CapApi:
                 ("generate_grasps_for_localization", "grasping"),
                 ("generate_grasps_from_observation", "grasping"),
                 ("localize_object_from_observation", "perception"),
+                ("partition_target_scene", "planning"),
             ):
                 registry.register(
                     getattr(self, name),

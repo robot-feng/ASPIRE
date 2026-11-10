@@ -131,6 +131,21 @@ but their coverage and the scene carve's effect on nearby surfaces remain
 unverified; acknowledgement alone does not establish collision clearance for an
 apple held in the gripper.
 
+For offline single-arm planning, `partition_target_scene()` can project a
+snapshot-bound target mask separately from its visible background. Passing the
+result as `target_scene_partition` together with its `scene` and an
+`attached_object` to `CuRoboProvider.plan_to_pose()` or `plan_to_joints()`
+reconstructs the partition from the original observation and localization. The
+client binds the planning state and transmits a hash of the exact scene points;
+the service checks those bytes and echoes the partition identity. In this mode
+the service skips its additional attached-sphere carve, preserving background
+points that would otherwise be removed near the held object. It still removes
+points near robot collision spheres, which can also remove nearby obstacles.
+All plans in this mode are explicitly `collision_aware=False`, even if the
+service reports enabled checks: the service verifies the received bytes, not
+the physical observation, segmentation, unseen space, or robot model. This mode
+is a preview facility and is not yet connected to the public CAP task API.
+
 Before executing generated poses on an AgiBot G1, ASPIRE still needs a
 cuRobo-compatible config based on the installed G1 arm description, a
 consistent joint/link mapping and tool frame, the Omnipicker

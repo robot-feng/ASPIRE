@@ -29,6 +29,7 @@ SHARED_PUBLIC_TOOL_NAMES = frozenset(
         "move_to_pose",
         "move_synchronized",
         "open_gripper",
+        "partition_target_scene",
         "plan_motion",
         "plan_synchronized_motion",
         "segment_points",

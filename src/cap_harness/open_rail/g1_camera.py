@@ -108,6 +108,99 @@ class G1HeadKinematics:
     base_from_mount: Callable[[tuple[float, float], tuple[float, float]], Any]
 
 
+@dataclass(frozen=True, slots=True)
+class G1RgbdRectification:
+    """Verified calibration for RGB-D already aligned on the distorted RGB grid.
+
+    The output grid and pinhole matrix come from ``G1CameraCalibration`` or
+    ``G1DynamicCameraCalibration``. Distortion is OpenCV's standard pinhole
+    model, not a fisheye model. This is opt-in and does not establish that the
+    supplied calibration, registration or RGB/depth timing is correct.
+    """
+
+    raw_intrinsics: np.ndarray
+    distortion_coefficients: np.ndarray
+    raw_intrinsics_resolution_hw: tuple[int, int]
+    camera_key: str
+    distortion_model: str
+    raw_intrinsics_verified: bool
+    distortion_verified: bool
+    input_is_distorted_rgb_verified: bool
+    depth_registered_to_distorted_rgb_verified: bool
+    depth_is_rgb_axial_z_verified: bool
+
+
+def _rectify_rgbd(
+    rgb: np.ndarray,
+    depth_u16: np.ndarray,
+    output_intrinsics: np.ndarray,
+    invalid_depth_values: tuple[int, ...],
+    camera_key: str,
+    calibration: G1RgbdRectification,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not isinstance(calibration, G1RgbdRectification):
+        raise OpenRailG1ObservationError("rectification must be a G1RgbdRectification")
+    for name in ("raw_intrinsics_verified", "distortion_verified", "input_is_distorted_rgb_verified", "depth_registered_to_distorted_rgb_verified", "depth_is_rgb_axial_z_verified"):
+        if getattr(calibration, name) is not True:
+            raise OpenRailG1ObservationError(f"RGB-D rectification requires verified {name}")
+    if calibration.camera_key != camera_key:
+        raise OpenRailG1ObservationError("rectification camera key does not match the snapshot")
+    if calibration.distortion_model != "opencv_pinhole_brown_conrady":
+        raise OpenRailG1ObservationError("rectification requires the OpenCV pinhole distortion model")
+    resolution = calibration.raw_intrinsics_resolution_hw
+    if (
+        not isinstance(resolution, (list, tuple)) or len(resolution) != 2
+        or any(isinstance(x, (bool, np.bool_)) or not isinstance(x, (int, np.integer)) or x <= 0 for x in resolution)
+        or tuple(resolution) != rgb.shape[:2]
+    ):
+        raise OpenRailG1ObservationError("raw intrinsics resolution does not match RGB-D")
+    if not invalid_depth_values:
+        raise OpenRailG1ObservationError("RGB-D rectification requires a verified invalid depth value for borders")
+    try:
+        raw_matrix = np.asarray(calibration.raw_intrinsics)
+        raw_distortion = np.asarray(calibration.distortion_coefficients)
+        if raw_matrix.dtype.kind not in "iuf" or raw_distortion.dtype.kind not in "iuf":
+            raise ValueError("intrinsics and distortion must be numeric")
+        matrix = raw_matrix.astype(np.float64)
+        distortion = raw_distortion.astype(np.float64)
+        if (
+            matrix.shape != (3, 3) or not np.isfinite(matrix).all()
+            or matrix[0, 0] <= 0 or matrix[1, 1] <= 0
+            or not np.allclose(matrix[2], (0, 0, 1), rtol=0, atol=1e-6)
+            or not np.allclose((matrix[0, 1], matrix[1, 0]), (0, 0), rtol=0, atol=1e-10)
+            or not np.allclose((output_intrinsics[0, 1], output_intrinsics[1, 0]), (0, 0), rtol=0, atol=1e-10)
+            or distortion.ndim != 1 or len(distortion) not in (4, 5, 8)
+            or not np.isfinite(distortion).all()
+        ):
+            raise ValueError("invalid pinhole intrinsics or distortion coefficients")
+    except (TypeError, ValueError) as exc:
+        raise OpenRailG1ObservationError("invalid RGB-D rectification parameters") from exc
+
+    import cv2
+
+    height, width = rgb.shape[:2]
+    try:
+        map_x, map_y = cv2.initUndistortRectifyMap(
+            matrix, distortion, None, output_intrinsics, (width, height), cv2.CV_32FC1
+        )
+        if not np.isfinite(map_x).all() or not np.isfinite(map_y).all():
+            raise ValueError("rectification map contains non-finite coordinates")
+        # OpenCV's float map can put an exact boundary at e.g. -2e-16 even
+        # for zero distortion. Snap only numerical noise at image boundaries.
+        for grid, upper in ((map_x, width - 1), (map_y, height - 1)):
+            grid[np.abs(grid) < 1e-6] = 0
+            grid[np.abs(grid - upper) < 1e-6] = upper
+        out_rgb = cv2.remap(rgb, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        out_depth = cv2.remap(depth_u16, map_x, map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=invalid_depth_values[0])
+        # Even when nearest-neighbour rounding would pick a boundary pixel,
+        # out-of-grid coordinates do not represent an observed depth ray.
+        outside = (map_x < 0) | (map_x > width - 1) | (map_y < 0) | (map_y > height - 1)
+        out_depth[outside] = invalid_depth_values[0]
+    except (ValueError, cv2.error) as exc:
+        raise OpenRailG1ObservationError("RGB-D rectification failed") from exc
+    return out_rgb, out_depth
+
+
 def _require_verified(calibration: G1CameraCalibration) -> None:
     checks = (
         ("depth_scale_verified", calibration.depth_scale_verified),
@@ -289,6 +382,7 @@ def camera_observation_from_snapshot(
     calibration: G1CameraCalibration | G1DynamicCameraCalibration,
     *,
     head_kinematics: G1HeadKinematics | None = None,
+    rectification: G1RgbdRectification | None = None,
 ) -> CameraObservation:
     """Convert raw RGB/Z16 to a calibrated pinhole ``CameraObservation``.
 
@@ -300,6 +394,13 @@ def camera_observation_from_snapshot(
     claim is required explicitly. This does not construct a full ASPIRE
     ``Observation``: that also requires a verified arm model and end-effector
     state derived from this same snapshot.
+
+    If ``rectification`` is provided, ``calibration.intrinsics`` describes
+    the output pinhole grid. Both inputs must already be registered to the
+    same *distorted* RGB grid, and depth must be the RGB camera's axial Z.
+    The caller must have verified the rectification itself as well as the
+    coefficients, source alignment and camera calibration. The source snapshot
+    is preserved, and invalid or out-of-grid depth becomes zero in the result.
     """
     if not isinstance(snapshot, OpenRailSnapshot):
         raise OpenRailG1ObservationError("snapshot must be an OpenRailSnapshot")
@@ -531,6 +632,11 @@ def camera_observation_from_snapshot(
                 "dynamic base_from_camera composition is not a valid rigid transform"
             ) from exc
 
+    if rectification is not None:
+        rgb, depth_u16 = _rectify_rgbd(
+            rgb, depth_u16, intrinsics, invalid_depth_values,
+            calibration.public_camera_key, rectification,
+        )
     depth_m = depth_u16.astype(np.float64) * scale
     if invalid_depth_values:
         depth_m[np.isin(depth_u16, invalid_depth_values)] = 0.0
@@ -549,5 +655,6 @@ __all__ = [
     "G1CameraCalibration",
     "G1DynamicCameraCalibration",
     "G1HeadKinematics",
+    "G1RgbdRectification",
     "camera_observation_from_snapshot",
 ]

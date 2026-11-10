@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import deque
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -21,6 +22,7 @@ class G1StateSamples:
             raise ValueError("expected 14 distinct arm joint names and a positive capacity")
         self._arm_names = tuple(arm_names)
         self._lock = threading.Lock()
+        self._updated = threading.Condition(self._lock)
         self._groups = {
             name: deque(maxlen=capacity)
             for name in ("arm", "head", "waist", "gripper_left", "gripper_right")
@@ -38,8 +40,9 @@ class G1StateSamples:
     def _append(self, group: str, timestamp: int, values: tuple[float, ...], velocity=None) -> None:
         if not np.isfinite(values).all() or (velocity is not None and not np.isfinite(velocity).all()):
             raise ValueError("state message contains non-finite values")
-        with self._lock:
+        with self._updated:
             self._groups[group].append((timestamp, values, velocity))
+            self._updated.notify_all()
 
     def arm(self, message: Any) -> None:
         if tuple(message.name) != self._arm_names or len(message.position) != 14:
@@ -85,8 +88,36 @@ class G1StateSamples:
         if not np.isfinite(positions).all() or not np.isfinite(velocities).all():
             raise ValueError("arm feedback contains non-finite values")
         sample = (self._timestamp(message), ids, positions, velocities)
-        with self._lock:
+        with self._updated:
             self._side_groups[side].append(sample)
+            self._updated.notify_all()
+
+    def wait_next_right_arm(self, after_ns: int, timeout_s: float):
+        """Wait for a newer raw right-arm DDS sample without acquiring a camera."""
+        return self._wait_next(self._side_groups["right"], after_ns, timeout_s)
+
+    def wait_next_right_gripper(self, after_ns: int, timeout_s: float):
+        """Wait for a newer native-normalized right-gripper DDS sample."""
+        return self._wait_next(self._groups["gripper_right"], after_ns, timeout_s)
+
+    def _wait_next(self, group, after_ns: int, timeout_s: float):
+        if isinstance(after_ns, bool) or not isinstance(after_ns, int) or after_ns < 0:
+            raise ValueError("after_ns must be a nonnegative integer")
+        if isinstance(timeout_s, (bool, np.bool_)):
+            raise ValueError("timeout_s must be finite and nonnegative")
+        timeout = float(timeout_s)
+        if not np.isfinite(timeout) or timeout < 0:
+            raise ValueError("timeout_s must be finite and nonnegative")
+        deadline = time.monotonic() + timeout
+        with self._updated:
+            while True:
+                newer = [sample for sample in group if sample[0] > after_ns]
+                if newer:
+                    return min(newer, key=lambda sample: sample[0])
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._updated.wait(remaining)
 
     def nearest_sides(self, timestamp_ns: int) -> dict[str, dict[str, object]]:
         """Return per-side raw feedback; it is not merged into the CAP state."""

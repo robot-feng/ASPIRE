@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import tempfile
 from typing import Any, Literal
@@ -97,6 +98,23 @@ class AttachedObjectRequest(BaseModel):
         return self
 
 
+class TargetScenePartitionRequest(BaseModel):
+    mode: Literal["pixel_partition_v1"]
+    snapshot_id: str
+    snapshot_fingerprint: str
+    scene_fingerprint: str
+    scene_points_sha256: str
+
+    @model_validator(mode="after")
+    def validate_fingerprints(self) -> TargetScenePartitionRequest:
+        if not self.snapshot_id.strip():
+            raise ValueError("partition snapshot_id must be nonempty")
+        for value in (self.snapshot_fingerprint, self.scene_fingerprint, self.scene_points_sha256):
+            if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError("partition fingerprints must be lowercase SHA-256")
+        return self
+
+
 class BaseRequest(BaseModel):
     base_frame: str
     model: Literal["panda", "dual_panda", "yam_real", "agibot_g1"]
@@ -109,7 +127,27 @@ class BaseRequest(BaseModel):
     interpolation_dt_s: float | None = None
     maximum_trajectory_dt_s: float | None = None
     attached_object: AttachedObjectRequest | None = None
+    target_scene_partition: TargetScenePartitionRequest | None = None
     _g1_joint_map: dict[str, str] | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def validate_target_scene_partition(self) -> BaseRequest:
+        if self.target_scene_partition is None:
+            return self
+        if self.attached_object is None or self.scene_points_base64 is None:
+            raise ValueError("target scene partition requires an attached object and scene")
+        try:
+            points = np.asarray(decode_numpy(self.scene_points_base64))
+            if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0 or points.dtype != np.float32:
+                raise ValueError("partition scene must have float32 shape (N, 3)")
+            if not np.all(np.isfinite(points)):
+                raise ValueError("partition scene must contain finite points")
+            digest = hashlib.sha256(np.ascontiguousarray(points).tobytes()).hexdigest()
+        except Exception as exc:
+            raise ValueError(f"invalid partition scene payload: {exc}") from exc
+        if digest != self.target_scene_partition.scene_points_sha256:
+            raise ValueError("partition scene points do not match their SHA-256")
+        return self
 
 
 class IkRequest(BaseRequest):
@@ -372,7 +410,7 @@ def _robot_config(request: BaseRequest) -> str:
 def _attachment_diagnostics(request: BaseRequest) -> dict[str, Any] | None:
     if request.attached_object is None:
         return None
-    return {
+    result = {
         "object_link": request.attached_object.object_link_name,
         "collision_model": "caller_supplied_spheres",
         "geometry_verified": False,
@@ -382,6 +420,12 @@ def _attachment_diagnostics(request: BaseRequest) -> dict[str, Any] | None:
             request.attached_object.contact_link_names
         ),
     }
+    if request.target_scene_partition is not None:
+        result["scene_partition"] = request.target_scene_partition.model_dump()
+        # Robot geometry carving is still active. Even without the attachment
+        # carve, a nearby surface may be removed by robot collision spheres.
+        result["robot_scene_carve_may_remove_support_points"] = True
+    return result
 
 
 def _collision_diagnostics(request: BaseRequest) -> dict[str, bool]:
@@ -406,6 +450,9 @@ def _collision_diagnostics(request: BaseRequest) -> dict[str, bool]:
         # joints or tool frame correspond to the physical robot. Expose offline
         # plans without presenting them as verified execution trajectories.
         result["robot_model_verified"] = False
+    if request.target_scene_partition is not None:
+        result["target_partition_safety_verified"] = False
+        result["robot_scene_carve_verified"] = False
     return result
 
 
@@ -721,7 +768,7 @@ def _carve_robot_points(request: BaseRequest, robot: Any, points: np.ndarray) ->
         else max(float(request.voxel_size_m), _ROBOT_SEGMENTATION_DISTANCE_M)
     )
     filtered = _filter_robot_points(points, spheres, padding_m=margin)
-    if request.attached_object is not None:
+    if request.attached_object is not None and request.target_scene_partition is None:
         try:
             current = _state(request, robot)
             poses = robot.compute_kinematics(current).tool_poses.to_dict()

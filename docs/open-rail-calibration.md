@@ -70,3 +70,22 @@ visible edge of the same flat, untrimmed sheet and lie inside the image. The
 local edge test samples only matching contrast transitions near those manually
 marked edges, with exploratory thresholds; it cannot prove full-image
 registration or replace inspection of the original images.
+
+## Optional calibrated RGB-D undistortion
+
+`G1RgbdRectification` may be passed explicitly to `G1ObservationControl` (or
+`camera_observation_from_snapshot`) when the original RGB and depth are proven
+to occupy the same *distorted RGB* grid and depth is proven to represent RGB
+optical-axis Z. Supply verified raw RGB pinhole intrinsics, OpenCV Brown-Conrady
+distortion coefficients and image dimensions. The normal camera calibration's
+intrinsics are the output rectified pinhole K, and its rectification,
+registration, depth, timing and camera-pose verification requirements still
+apply. No candidate calibration is selected automatically.
+
+The same OpenCV inverse map is applied to RGB using bilinear interpolation and
+to raw Z16 using nearest-neighbour sampling. Source invalid values and
+out-of-grid depth become invalid output, not interpolated measurements. The
+source snapshot remains unchanged. Resampling itself can introduce a
+subpixel RGB-depth discrepancy near discontinuities; independently verify that
+the resulting alignment is adequate before using it for planning. This is not
+a calibration or registration procedure, and does not validate metric scale.

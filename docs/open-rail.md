@@ -47,13 +47,27 @@ depth-filter thresholds, gripper sweep geometry, gripper-base-to-TCP transform
 and control period. Service URLs can be supplied independently. The adapter
 must be read-only and scoped to the right arm; the caller closes it and
 finalizes the recorder. No model service or policy process is started by this
-function. The inputs are not proof of physical calibration. The current code
-does not yet construct a calibrated G1 control facade; contact, lift, holding
-verification and a complete execution launcher remain to be integrated.
+function. The inputs are not proof of physical calibration.
+`G1ObservationControl` connects a caller-owned read-only G1 runtime to the
+adapter, converting the camera and both arms from the same raw snapshot. It
+requires verified calibration, a verified common-clock reference and explicit
+freshness limits; its command methods always refuse motion. The physical G1
+calibration is not yet available, and the motion-enabled control facade,
+contact, lift, holding verification and complete execution launcher remain to
+be integrated.
 When candidate generation succeeds, the recorder also writes
 `media/grasp-candidates.ply` with the observed scene, framed candidate axes,
 and approach directions. It is a visualization, not a collision or reachability
 certificate, and does not depict a guessed physical gripper.
+
+For an observed target already attached to the tool, the Open-RAIL CAP API
+can partition the target and environment using the target's pixels from the
+same observation. Pass the resulting scene and partition together with the
+attachment to a supporting cuRobo planner. The service verifies the transmitted
+scene and avoids a second attachment-sphere carve; the robot-body carve may
+still remove nearby obstacles, so the resulting plan is explicitly marked
+non-executable. This is a preview capability and does not establish that
+occluded space is free or that the segmentation and attachment are correct.
 
 `HoldVerifier` compares a post-close baseline with timestamped observations
 during and after the lift. It requires the object to rise with the tool and

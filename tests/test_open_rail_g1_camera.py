@@ -9,6 +9,7 @@ from cap_harness.open_rail.g1_camera import (
     G1CameraCalibration,
     G1DynamicCameraCalibration,
     G1HeadKinematics,
+    G1RgbdRectification,
     camera_observation_from_snapshot,
 )
 from cap_harness.open_rail.g1_runtime import (
@@ -172,6 +173,112 @@ def test_verified_raw_snapshot_converts_to_camera_observation_only() -> None:
     assert camera.timestamp_s == 1.0
     assert not camera.rgb.flags.writeable
     assert not camera.depth_m.flags.writeable
+
+
+def _rectification(**changes) -> G1RgbdRectification:
+    values = {
+        "raw_intrinsics": np.array([[18.0, 0.0, 15.0], [0.0, 18.0, 15.0], [0.0, 0.0, 1.0]]),
+        "distortion_coefficients": np.array([0.3, 0.0, 0.0, 0.0, 0.0]),
+        "raw_intrinsics_resolution_hw": (31, 31),
+        "camera_key": "head",
+        "distortion_model": "opencv_pinhole_brown_conrady",
+        "raw_intrinsics_verified": True,
+        "distortion_verified": True,
+        "input_is_distorted_rgb_verified": True,
+        "depth_registered_to_distorted_rgb_verified": True,
+        "depth_is_rgb_axial_z_verified": True,
+    }
+    values.update(changes)
+    return G1RgbdRectification(**values)
+
+
+def test_rectification_uses_one_map_and_nearest_depth_without_mutating_snapshot():
+    yy, xx = np.indices((31, 31))
+    rgb = np.stack((xx * 7, yy * 7, np.zeros_like(xx)), axis=-1).astype(np.uint8)
+    raw_depth = (1000 + yy * 31 + xx).astype(np.uint16)
+    raw_depth[15, 24] = 65535
+    raw_depth[15, 15] = 65535
+    original_rgb, original_depth = rgb.copy(), raw_depth.copy()
+    snapshot = replace(_snapshot(), rgb=rgb, depth_u16=raw_depth)
+    calibration = _calibration(intrinsics=_rectification().raw_intrinsics,
+                               intrinsics_resolution_hw=(31, 31))
+    output = camera_observation_from_snapshot(snapshot, calibration, rectification=_rectification())
+
+    # At output (x=23,y=15), analytical Brown-Conrady distortion maps to
+    # x=23.474; RGB interpolates while depth picks the nearest input pixel.
+    expected_x = 15 + 8 * (1 + 0.3 * (8 / 18) ** 2)
+    assert output.rgb[15, 23, 0] == pytest.approx(expected_x * 7, abs=0.6)
+    assert output.depth_m[15, 23] == pytest.approx(raw_depth[15, round(expected_x)] * 0.001)
+    assert output.depth_m[15, 15] == 0.0
+    assert output.depth_m[0, 0] == 0.0  # outside the input grid
+    assert set(np.unique(np.rint(output.depth_m * 1000).astype(np.uint16))) <= set(np.unique(raw_depth)) | {0}
+    np.testing.assert_array_equal(snapshot.rgb, original_rgb)
+    np.testing.assert_array_equal(snapshot.depth_u16, original_depth)
+    np.testing.assert_array_equal(output.intrinsics, calibration.intrinsics)
+    assert output.timestamp_s == 1.0 and not output.depth_m.flags.writeable
+
+
+@pytest.mark.parametrize("field", ["raw_intrinsics_verified", "distortion_verified", "input_is_distorted_rgb_verified", "depth_registered_to_distorted_rgb_verified", "depth_is_rgb_axial_z_verified"])
+def test_rectification_rejects_unverified_input_claims(field):
+    snapshot = replace(_snapshot(), rgb=np.zeros((31, 31, 3), dtype=np.uint8),
+                       depth_u16=np.ones((31, 31), dtype=np.uint16))
+    calibration = _calibration(intrinsics=_rectification().raw_intrinsics,
+                               intrinsics_resolution_hw=(31, 31))
+    with pytest.raises(OpenRailG1ObservationError, match=field):
+        camera_observation_from_snapshot(snapshot, calibration, rectification=_rectification(**{field: False}))
+
+
+def test_rectification_refuses_unverified_registration_invalid_parameters_and_missing_border_sentinel():
+    snapshot = replace(_snapshot(), rgb=np.zeros((31, 31, 3), dtype=np.uint8),
+                       depth_u16=np.ones((31, 31), dtype=np.uint16))
+    calibration = _calibration(intrinsics=_rectification().raw_intrinsics,
+                               intrinsics_resolution_hw=(31, 31))
+    with pytest.raises(OpenRailG1ObservationError, match="depth_registration_verified"):
+        camera_observation_from_snapshot(snapshot, replace(calibration, depth_registration_verified=False), rectification=_rectification())
+    with pytest.raises(OpenRailG1ObservationError, match="intrinsics_verified"):
+        camera_observation_from_snapshot(snapshot, replace(calibration, intrinsics_verified=False), rectification=_rectification())
+    with pytest.raises(OpenRailG1ObservationError, match="rectification_verified"):
+        camera_observation_from_snapshot(snapshot, replace(calibration, rectification_verified=False), rectification=_rectification())
+    with pytest.raises(OpenRailG1ObservationError, match="invalid depth value"):
+        camera_observation_from_snapshot(snapshot, replace(calibration, invalid_depth_values=()), rectification=_rectification())
+    skewed_k = _rectification().raw_intrinsics.copy()
+    skewed_k[0, 1] = 0.1
+    with pytest.raises(OpenRailG1ObservationError, match="rectification parameters"):
+        camera_observation_from_snapshot(snapshot, replace(calibration, intrinsics=skewed_k), rectification=_rectification())
+    with pytest.raises(OpenRailG1ObservationError, match="rectification parameters"):
+        camera_observation_from_snapshot(snapshot, calibration, rectification=_rectification(raw_intrinsics=skewed_k))
+    for bad in (_rectification(camera_key="wrong"), _rectification(raw_intrinsics_resolution_hw=(30, 31)),
+                _rectification(distortion_model="opencv_fisheye_equidistant"),
+                _rectification(distortion_coefficients=[float("nan")] * 5)):
+        with pytest.raises(OpenRailG1ObservationError):
+            camera_observation_from_snapshot(snapshot, calibration, rectification=bad)
+
+
+def test_rectification_uses_explicit_output_intrinsics_and_alternative_invalid_sentinel():
+    yy, xx = np.indices((31, 31))
+    rgb = np.stack((xx, yy, np.zeros_like(xx)), axis=-1).astype(np.uint8)
+    raw_depth = (1000 + yy * 31 + xx).astype(np.uint16)
+    snapshot = replace(_snapshot(), rgb=rgb, depth_u16=raw_depth)
+    output_k = np.array([[9.0, 0, 15.0], [0, 9.0, 15.0], [0, 0, 1.0]])
+    calibration = _calibration(intrinsics=output_k, intrinsics_resolution_hw=(31, 31),
+                               invalid_depth_values=(65535,))
+    result = camera_observation_from_snapshot(snapshot, calibration, rectification=_rectification())
+    np.testing.assert_array_equal(result.intrinsics, output_k)
+    # Narrower output focal length maps the outer output pixels beyond input.
+    assert result.depth_m[0, 0] == 0.0
+    assert result.depth_m[15, 15] == pytest.approx(raw_depth[15, 15] * 0.001)
+
+
+def test_rectification_also_composes_with_dynamic_head_kinematics():
+    snapshot = replace(_snapshot(), rgb=np.full((31, 31, 3), 30, dtype=np.uint8),
+                       depth_u16=np.full((31, 31), 1000, dtype=np.uint16))
+    calibration = _dynamic_calibration(intrinsics=_rectification().raw_intrinsics,
+                                       intrinsics_resolution_hw=(31, 31))
+    result = camera_observation_from_snapshot(
+        snapshot, calibration, head_kinematics=_head_kinematics(), rectification=_rectification()
+    )
+    assert result.depth_m[15, 15] == pytest.approx(1.0)
+    np.testing.assert_allclose(result.camera_pose.position, [0.1, 0.2, 0.3])
 
 
 def test_dynamic_camera_pose_uses_snapshot_head_and_waist_fk() -> None:

@@ -412,7 +412,7 @@ class OpenRailG1CommandRuntime:
                 },
             )
         self._session_state.mark_complete()
-        return ExecutionResult(ok=True, steps_executed=1)
+        return ExecutionResult(ok=True, steps_executed=1, diagnostics=self._feedback_diagnostics())
 
     def set_gripper(
         self,
@@ -500,7 +500,16 @@ class OpenRailG1CommandRuntime:
                 },
             )
         self._session_state.mark_complete()
-        return ExecutionResult(ok=True, steps_executed=1)
+        return ExecutionResult(ok=True, steps_executed=1, diagnostics=self._feedback_diagnostics())
+
+    def _feedback_diagnostics(self) -> dict[str, object]:
+        try:
+            evidence = getattr(self._feedback, "last_evidence", None)
+        except Exception:
+            # A diagnostic accessor cannot turn a terminal feedback result into
+            # an ambiguous action exception.
+            return {}
+        return {"measured_feedback": dict(evidence)} if isinstance(evidence, Mapping) else {}
 
     def _uncertain_state_failure(self) -> ExecutionResult:
         state = self._session_state.health

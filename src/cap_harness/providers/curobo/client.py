@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+import hashlib
 
 import numpy as np
 import requests
@@ -89,6 +90,39 @@ def _validate_attachment_ack(
         raise ValueError("cuRobo attachment diagnostics did not acknowledge caller-supplied spheres")
 
 
+def _validated_partition_payload(partition, scene, state, attached_object):
+    """Rebuild a pixel partition before binding its exact scene to a request."""
+    if partition is None:
+        return None
+    from cap_harness.open_rail.scene_partition import verify_target_scene_partition
+    from cap_harness.open_rail.snapshot_identity import snapshot_fingerprint
+
+    if attached_object is None:
+        raise ValueError("pixel-partitioned scene requires an attached object")
+    verify_target_scene_partition(partition, scene)
+    source_camera = partition.source_observation.cameras[partition.target_camera]
+    if snapshot_fingerprint(source_camera, state) != partition.snapshot_fingerprint:
+        raise ValueError("planning state does not match the pixel-partitioned observation")
+    points = np.ascontiguousarray(scene.point_cloud.points, dtype=np.float32)
+    return {
+        "mode": "pixel_partition_v1",
+        "snapshot_id": partition.snapshot_id,
+        "snapshot_fingerprint": partition.snapshot_fingerprint,
+        "scene_fingerprint": partition.scene_fingerprint,
+        "scene_points_sha256": hashlib.sha256(points.tobytes()).hexdigest(),
+    }
+
+
+def _validate_partition_ack(response, partition_payload):
+    if partition_payload is None:
+        return
+    diagnostic = response.get("attachment_diagnostics")
+    if not isinstance(diagnostic, Mapping) or diagnostic.get("scene_partition") != partition_payload:
+        raise ValueError("cuRobo did not acknowledge the exact pixel-partitioned scene")
+    if diagnostic.get("robot_scene_carve_may_remove_support_points") is not True:
+        raise ValueError("cuRobo did not acknowledge the unverified robot carve")
+
+
 def _collision_acknowledged(
     response: Mapping[str, object],
     *,
@@ -150,6 +184,7 @@ class CuRoboProvider:
     """Use cuRobo without importing CUDA extensions into the harness process."""
 
     supports_attached_objects = True
+    supports_target_scene_partition = True
 
     def __init__(
         self,
@@ -282,6 +317,7 @@ class CuRoboProvider:
         interpolation_dt_s: float | None = None,
         maximum_trajectory_dt_s: float | None = None,
         attached_object: AttachedObjectGeometry | None = None,
+        target_scene_partition: object | None = None,
     ) -> PlanResult:
         return self._plan(
             robot_state,
@@ -294,6 +330,7 @@ class CuRoboProvider:
             interpolation_dt_s=interpolation_dt_s,
             maximum_trajectory_dt_s=maximum_trajectory_dt_s,
             attached_object=attached_object,
+            target_scene_partition=target_scene_partition,
         )
 
     def plan_to_joints(
@@ -309,6 +346,7 @@ class CuRoboProvider:
         interpolation_dt_s: float | None = None,
         maximum_trajectory_dt_s: float | None = None,
         attached_object: AttachedObjectGeometry | None = None,
+        target_scene_partition: object | None = None,
     ) -> PlanResult:
         return self._plan(
             robot_state,
@@ -321,6 +359,7 @@ class CuRoboProvider:
             interpolation_dt_s=interpolation_dt_s,
             maximum_trajectory_dt_s=maximum_trajectory_dt_s,
             attached_object=attached_object,
+            target_scene_partition=target_scene_partition,
         )
 
     def _plan(
@@ -336,6 +375,7 @@ class CuRoboProvider:
         interpolation_dt_s: float | None,
         maximum_trajectory_dt_s: float | None,
         attached_object: AttachedObjectGeometry | None,
+        target_scene_partition: object | None,
     ) -> PlanResult:
         error = self._validate_request(robot_state, target, arm)
         if error is not None:
@@ -356,6 +396,14 @@ class CuRoboProvider:
         payload = self._base_payload(
             robot_state, context, scene, attached_object=attached_object
         )
+        try:
+            partition_payload = _validated_partition_payload(
+                target_scene_partition, scene, robot_state, attached_object
+            )
+        except (TypeError, ValueError) as exc:
+            return self._plan_failure("invalid pixel-partitioned scene", {"error": str(exc)})
+        if partition_payload is not None:
+            payload["target_scene_partition"] = partition_payload
         payload.update({"arm": arm, "target": self._encode_target(target, robot_state.embodiment)})
         dilation = self._time_dilation(time_dilation_factor)
         if interpolation_dt_s is not None:
@@ -370,6 +418,7 @@ class CuRoboProvider:
         try:
             response = self._http.post_json(PLAN_PATH, payload)
             _validate_attachment_ack(response, attached_object)
+            _validate_partition_ack(response, partition_payload)
             collision_ack = _collision_acknowledged(
                 response,
                 attached_object=attached_object,
@@ -394,7 +443,9 @@ class CuRoboProvider:
                 planner=f"curobo_v2_{planning_mode}",
                 # A missing ACK is legacy-compatible only for unattached,
                 # non-strict callers. An explicit negative ACK is never true.
-                collision_aware=collision_ack is not False,
+                # Robot-sphere scene removal may erase support points and
+                # hidden geometry remains unobserved; preview only.
+                collision_aware=collision_ack is not False and partition_payload is None,
                 expected_start=robot_state,
                 arm=arm,
                 gripper_positions=np.full(len(waypoints), gripper),
@@ -421,10 +472,15 @@ class CuRoboProvider:
             "collision_acknowledged": collision_ack is not None,
         }
         if collision_ack is not None:
-            diagnostics["collision_aware"] = collision_ack
+            diagnostics["collision_aware"] = trajectory.collision_aware
+            if partition_payload is not None:
+                diagnostics["collision_checks_enabled"] = collision_ack
         else:
             diagnostics["collision_ack_status"] = "legacy_service_unknown"
         diagnostics.update(_attachment_diagnostics(attached_object))
+        if partition_payload is not None:
+            diagnostics["scene_partition"] = partition_payload
+            diagnostics["robot_scene_carve_may_remove_support_points"] = True
         return PlanResult(
             ok=True,
             trajectory=trajectory,

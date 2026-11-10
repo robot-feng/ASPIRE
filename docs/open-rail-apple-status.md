@@ -197,6 +197,13 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   has a generic 200 mm TCP. The calibration's full orientation and its
   correspondence to the active robot are unconfirmed. None of these values is
   used as a verified GraspGen-X-to-robot TCP transform.
+- [AGIBOT's pinned GenieSim G1 OmniPicker URDF](https://huggingface.co/datasets/agibot-world/GenieSimAssets/resolve/1eb3b68b740f87fb369b0146ee53f3bb3da6b0d0/G1_omnipicker/G1_omnipicker.urdf)
+  (SHA-256 `311389b09e8bcc49eae6189fb784b0114058209bd068d122ea2acde0ea6f229a`)
+  agrees with the Dream model's right-gripper attachment and 143.08 mm center
+  joint. The Dream 126 mm record's digest matches its model, but its tool did
+  not connect to a robot or camera; that is file provenance, not a measurement
+  of the installed tool. The official model is simulation evidence and does not
+  verify the physical TCP or a collision model for this robot.
 - Open-RAIL uses a normalized gripper command with 0=open and 1=closed. The
   mapping from this value to the candidate URDF's gripper joint angle or actual
   opening width has not been established; it cannot yet support swept-volume

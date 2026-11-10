@@ -35,6 +35,16 @@ verified. The current profile has no verified joint limits, so it cannot enable
 arm dispatch even if feedback is supplied. A local timeout never claims
 cancellation and never sends the global stop.
 
+`G1MeasuredCommandFeedback` can evaluate post-command DDS samples inside the
+observation worker once the motor mapping, units, clock and tolerances are
+verified. It requires a continuous window of fresh position and velocity
+measurements and preserves terminal evidence. It is not yet connected to the
+parent command facade: Open-RAIL's fixed-timeout RPC and its interaction with
+concurrent observation, cancellation and trajectory timing remain unverified.
+A gripper stopping short of its requested closed position may indicate contact;
+the target-position check alone neither confirms a grasp nor provides a safe
+contact-completion signal for a lift.
+
 After a command publish attempt, a feedback exception or unconfirmed timeout
 permanently latches that Open-RAIL proxy session as motion-uncertain. Every
 later arm or gripper command is rejected across command facades. Reset, cancel,
