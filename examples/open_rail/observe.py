@@ -19,13 +19,16 @@ from cap_harness.open_rail.g1_runtime import OpenRailG1ObservationRuntime
 
 def save_snapshot(snapshot, output: Path) -> dict:
     """Preserve decoded RGB, unscaled depth, raw state and source timestamps."""
-    names = ("head_rgb.png", "head_depth_u16.npy", "robot_state.npy", "snapshot.json")
+    names = ("head_rgb.png", "head_depth_u16.npy", "robot_state.npy", "arm_velocity_raw.npy", "snapshot.json")
     if any((output / name).exists() for name in names):
         raise FileExistsError(f"snapshot output already exists in {output}")
     Image.fromarray(snapshot.rgb).save(output / "head_rgb.png")
     if snapshot.depth_u16 is not None:
         np.save(output / "head_depth_u16.npy", snapshot.depth_u16)
     np.save(output / "robot_state.npy", snapshot.state)
+    velocity = getattr(snapshot, "arm_velocity_raw", None)
+    if velocity is not None:
+        np.save(output / "arm_velocity_raw.npy", velocity)
     metadata = {
         **snapshot.metadata,
         "rgb_timestamp_ns": snapshot.rgb_timestamp_ns,
@@ -34,6 +37,7 @@ def save_snapshot(snapshot, output: Path) -> dict:
         "state_timestamps_ns": snapshot.state_timestamps_ns,
         "is_synchronized": snapshot.is_synchronized,
         "depth_error": snapshot.depth_error,
+        "arm_velocity_raw_file": "arm_velocity_raw.npy" if velocity is not None else None,
     }
     (output / "snapshot.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -52,6 +56,10 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument("--require-depth", action="store_true")
     parser.add_argument("--maximum-skew-ms", type=float, default=None)
+    parser.add_argument(
+        "--bound-state-sampling", action="store_true",
+        help="subscribe to individual DDS state messages for read-only timing diagnostics",
+    )
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--interval", type=float, default=2.5, help="seconds between samples")
     args = parser.parse_args()
@@ -64,6 +72,7 @@ def main() -> int:
     with OpenRailG1ObservationRuntime(
         open_rail_root=args.open_rail_root,
         maximum_rgb_depth_skew_ms=args.maximum_skew_ms,
+        bound_state_sampling=args.bound_state_sampling,
     ) as runtime:
         last_timestamp = None
         for index in range(1, args.samples + 1):

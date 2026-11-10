@@ -11,6 +11,7 @@ from cap_harness.contracts import CameraObservation, GraspSet, Observation, Pose
 from cap_harness.errors import ApiError, ErrorCode
 from cap_harness.geometry import mask_to_point_cloud
 from cap_harness.open_rail.verification import HoldVerifier
+from cap_harness.open_rail.hold_replay import HoldReplaySample, replay_hold
 from cap_harness.providers.depth_refined import DepthRefinedSegmentationProvider, refine_target_mask
 from cap_harness.providers.wevisone import WeVisOneProvider
 
@@ -254,9 +255,25 @@ def test_provider_filter_flows_through_cap_localization_and_hold_verifier(tmp_pa
         max_sample_gap_s=1.1,
         max_state_skew_s=0.01,
     )
-    results = [verifier.observe(*sample(t, 0.1)) for t in (2.0, 3.0, 4.0, 5.0)]
+    captured = [sample(t, 0.1) for t in (2.0, 3.0, 4.0, 5.0)]
+    results = [verifier.observe(*item) for item in captured]
 
     assert results[-1].status == "verified"
+    replayed = replay_hold(
+        *baseline,
+        [HoldReplaySample(index, *item) for index, item in enumerate(captured)],
+        expected_samples=4,
+        capture_clock_verified=True,
+        camera_name="head",
+        arm="right",
+        up_in_base=(0, 0, 1),
+        minimum_lift_m=0.05,
+        max_relative_error_m=0.02,
+        max_sample_gap_s=1.1,
+        max_state_skew_s=0.01,
+    )
+    assert replayed.status == "verified_history"
+    assert replayed.current_hold_verified is False
     import hashlib
     import json
 

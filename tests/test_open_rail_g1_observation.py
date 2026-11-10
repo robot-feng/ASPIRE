@@ -148,8 +148,32 @@ def test_synchronization_requires_bound_state_and_matching_timestamps(tmp_path) 
     observation = _observation(depth=np.ones((3, 5), dtype=np.uint16))
     observation["state_timestamps_bind_state_values"] = True
     assert adapter._decode(observation).is_synchronized
+    broken_depth = dict(observation, depth_error="bad packet")
+    assert not adapter._decode(broken_depth).is_synchronized
     observation["state_timestamps_ns"]["arm"] = 990_000_000
     assert not adapter._decode(observation).is_synchronized
+    observation["state_timestamps_ns"].pop("arm")
+    assert not adapter._decode(observation).is_synchronized
+    adapter.close()
+
+
+def test_runtime_retains_only_bound_measured_arm_velocity(tmp_path) -> None:
+    adapter = OpenRailG1ObservationRuntime(open_rail_root=tmp_path, proxy=_Proxy())
+    observation = _observation()
+    observation["bound_arm_sample"] = {"names": [f"joint{i}" for i in range(14)], "velocities_raw": np.arange(14, dtype=np.float32)}
+    with pytest.raises(OpenRailG1ObservationError, match="bound arm message"):
+        adapter._decode(observation)
+    observation["state_timestamps_bind_state_values"] = True
+    snapshot = adapter._decode(observation)
+    np.testing.assert_array_equal(snapshot.arm_velocities_rad_s, np.arange(14))
+    assert not snapshot.arm_velocities_rad_s.flags.writeable
+    observation["bound_arm_sample"]["velocities_raw"] = [0] * 7
+    partial = adapter._decode(observation)
+    assert partial.arm_velocities_rad_s is None
+    assert len(partial.arm_velocity_raw) == 7
+    observation["bound_arm_sample"]["velocities_raw"] = [0] * 15
+    with pytest.raises(OpenRailG1ObservationError, match="1 to 14 finite raw arm velocities"):
+        adapter._decode(observation)
     adapter.close()
 
 
@@ -446,6 +470,7 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     class FakeRobot:
         _left_ee_buffer = Buffer()
         _right_ee_buffer = Buffer()
+        arm_joint_names = [f"joint{i}" for i in range(14)]
 
         def arm_joint_states_nearest(self, timestamp):
             return [0.0] * 14, timestamp
@@ -539,6 +564,22 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
         observation["cam.range_image"], np.array([[12, 34]], dtype=np.uint16)
     )
 
+    class BoundSamples:
+        def nearest(self, timestamp):
+            assert timestamp == 100
+            return (np.arange(20, dtype=np.float32), np.arange(14, dtype=np.float32),
+                    {name: 99 for name in ("arm", "head", "waist", "gripper_left", "gripper_right")})
+
+    body._bound_state_samples = BoundSamples()
+    body.config.bound_arm_message_names = body.robot.arm_joint_names
+    bound_observation = body.retrieve_observation()
+    np.testing.assert_array_equal(bound_observation["obs.state"], np.arange(20))
+    np.testing.assert_array_equal(bound_observation["bound_arm_sample"]["velocities_raw"], np.arange(14))
+    assert bound_observation["bound_arm_sample"]["names"] == body.robot.arm_joint_names
+    assert bound_observation["state_timestamps_bind_state_values"] is True
+    assert len([key for key in bound_observation if not key.startswith("cam.")]) <= 16
+    body._bound_state_samples = None
+
     body.camera.rgb_packet = FakePacket(
         timestamp=100,
         color_format=4,
@@ -606,3 +647,54 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     assert capture[1]["metadata"]["packet_timestamp_ns"] == 101
     assert capture[1]["metadata"]["sdk_channel"] == "sdk/fisheye"
     assert body.camera.requested[-2:] == [("sdk/color", 100), ("sdk/fisheye", 100)]
+
+    # Exercise the opt-in subscriptions with message-shaped fakes; no SDK node
+    # or hardware is opened. Each callback must retain its own source stamp.
+    import logging
+
+    for package_name in ("sensor_msgs_pb", "sensor_msgs_pb.msg", "genie_msgs_pb", "genie_msgs_pb.msg"):
+        package = ModuleType(package_name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, package_name, package)
+    for package, message_name in (("sensor_msgs_pb", "JointState"), ("genie_msgs_pb", "EndState"),
+                                  ("genie_msgs_pb", "HeadState"), ("genie_msgs_pb", "WaistState")):
+        name = f"{package}.msg.{message_name}_pb2"
+        fake_module = ModuleType(name)
+        setattr(fake_module, message_name, type(message_name, (), {}))
+        monkeypatch.setitem(sys.modules, name, fake_module)
+
+    class FakeNode:
+        def __init__(self, name):
+            self.name = name
+            self.callbacks = {}
+
+        def create_subscriber(self, topic, _message_type, _qos, callback):
+            self.callbacks[topic] = callback
+            return callback
+
+    names = tuple([f"Joint{i}_l" for i in range(1, 8)] + [f"Joint{i}_r" for i in range(1, 8)])
+    body.robot.arm_joint_names = names
+    body.robot.qos = object()
+    fake_dds = ModuleType("agibotdds")
+    fake_dds.Node = FakeNode
+    fake_dds_package = ModuleType("cosine_bus.agibotdds_py3")
+    fake_dds_package.agibotdds = fake_dds
+    monkeypatch.setitem(sys.modules, "cosine_bus.agibotdds_py3", fake_dds_package)
+    body.logger = logging.getLogger(__name__)
+    body.config.bound_state_topics = {name: name for name in ("arm", "head", "waist", "gripper_left", "gripper_right")}
+    body.config.bound_arm_message_names = names
+    body._install_bound_state_subscriptions()
+    stamp = SimpleNamespace(sec=0, nanosec=100)
+    header = SimpleNamespace(stamp=stamp)
+    motor = lambda value: SimpleNamespace(position=value)
+    assert body._bound_state_node.name == "ASPIRE_G1_State"
+    callbacks = body._bound_state_node.callbacks
+    callbacks["arm"](SimpleNamespace(header=header, name=names, position=list(range(14)), velocity=[0.1] * 14))
+    callbacks["head"](SimpleNamespace(header=header, name=["joint_head_yaw", "joint_head_pitch"], motor_states=[motor(0), motor(0)]))
+    callbacks["waist"](SimpleNamespace(header=header, name=["joint_body_pitch", "joint_lift_body"], motor_states=[motor(0), motor(0)]))
+    for side in ("left", "right"):
+        callbacks[f"gripper_{side}"](SimpleNamespace(header=header, type=2, end_state=[motor(60)]))
+    bound_observation = body.retrieve_observation()
+    assert bound_observation["state_timestamps_bind_state_values"] is True
+    np.testing.assert_allclose(bound_observation["obs.state"], [*range(14), 0.5, 0.5, 0, 0, 0, 0])
+    np.testing.assert_allclose(bound_observation["bound_arm_sample"]["velocities_raw"], [0.1] * 14)

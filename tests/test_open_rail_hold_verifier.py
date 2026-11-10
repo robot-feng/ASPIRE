@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from cap_harness.contracts import (
     CameraObservation,
@@ -13,6 +14,7 @@ from cap_harness.contracts import (
     RobotState,
 )
 from cap_harness.open_rail.verification import HoldVerifier
+from cap_harness.open_rail.hold_replay import HoldReplaySample, replay_hold
 from cap_harness.open_rail.snapshot_identity import snapshot_fingerprint
 
 
@@ -204,3 +206,83 @@ def test_relative_position_uses_the_rotating_tool_frame() -> None:
 
     assert evidence.status == "pending"
     assert evidence.relative_error_m is not None and evidence.relative_error_m < 1e-10
+
+
+def _replay(samples, *, expected_samples=None, capture_clock_verified=True):
+    records = [
+        item if isinstance(item, HoldReplaySample) else HoldReplaySample(index, *item)
+        for index, item in enumerate(samples)
+    ]
+    return replay_hold(
+        *_sample(1.0, 0.0, 0.05, 0.10),
+        records,
+        expected_samples=len(records) if expected_samples is None else expected_samples,
+        capture_clock_verified=capture_clock_verified,
+        camera_name="head",
+        arm="right",
+        up_in_base=(0.0, 0.0, 1.0),
+        minimum_lift_m=0.05,
+        max_relative_error_m=0.02,
+        max_sample_gap_s=1.1,
+        max_state_skew_s=0.05,
+    )
+
+
+def test_replay_verifies_only_the_past_window() -> None:
+    result = _replay([_sample(t, 0.0, 0.15, 0.20) for t in (2.0, 3.0, 4.0, 5.0)])
+
+    assert result.status == "verified_history"
+    assert result.evidence[-1].stable_duration_s == 3.0
+    assert result.current_hold_verified is False
+    assert "current hold requires" in result.reason
+
+
+def test_replay_requires_verified_capture_clock() -> None:
+    samples = [_sample(t, 0.0, 0.15, 0.20) for t in (2.0, 3.0, 4.0, 5.0)]
+    with pytest.raises(ValueError, match="clock domain"):
+        _replay(samples, capture_clock_verified=False)
+
+
+def test_replay_does_not_skip_missing_localization_or_gaps() -> None:
+    samples = [_sample(t, 0.0, 0.15, 0.20) for t in (2.0, 3.0, 4.0, 5.0, 6.0)]
+    # Even an absent detection after a verified 3-second window invalidates the recording.
+    samples[-1] = samples[-1][0], None
+    missing = _replay(samples)
+    assert missing.status == "unknown"
+    assert "localization" in missing.reason
+    assert missing.evidence[-2].status == "verified"
+    assert missing.current_hold_verified is False
+
+    gap = _replay([_sample(t, 0.0, 0.15, 0.20) for t in (2.0, 3.0, 5.0, 6.0, 7.0, 8.0)])
+    assert gap.status == "unknown" and "gap" in gap.reason
+
+    missing_last = _replay([_sample(t, 0.0, 0.15, 0.20) for t in (2.0, 3.0)], expected_samples=3)
+    assert missing_last.status == "unknown" and "missing samples" in missing_last.reason
+    skipped_index = _replay([
+        HoldReplaySample(0, *_sample(2.0, 0.0, 0.15, 0.20)),
+        HoldReplaySample(2, *_sample(3.0, 0.0, 0.15, 0.20)),
+    ])
+    assert skipped_index.status == "unknown" and "sequence" in skipped_index.reason
+
+
+def test_replay_rejects_duplicate_reversed_and_stale_frames() -> None:
+    for times in ((2.0, 3.0, 3.0, 4.0, 5.0), (2.0, 3.0, 2.5, 4.0, 5.0)):
+        result = _replay([_sample(t, 0.0, 0.15, 0.20) for t in times])
+        assert result.status == "unknown"
+        assert "strictly increasing" in result.reason
+
+    observation, _ = _sample(3.0, 0.0, 0.15, 0.20)
+    _, stale_localization = _sample(2.0, 0.0, 0.15, 0.20)
+    result = _replay([_sample(2.0, 0.0, 0.15, 0.20), (observation, stale_localization)])
+    assert result.status == "unknown" and "snapshot" in result.reason
+
+
+def test_replay_rejects_slip_after_an_apparent_success() -> None:
+    samples = [_sample(t, 0.0, 0.15, 0.20) for t in (2.0, 3.0, 4.0, 5.0)]
+    samples.append(_sample(6.0, 0.05, 0.15, 0.20))
+    result = _replay(samples)
+
+    assert result.evidence[-2].status == "verified"
+    assert result.status == "not_verified"
+    assert result.evidence[-1].status == "not_following"
+    assert result.current_hold_verified is False

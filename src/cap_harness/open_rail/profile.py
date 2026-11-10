@@ -39,6 +39,8 @@ class G1ObservationProfile:
     selected_arm: str
     state_dimension: int
     state_layout: Mapping[str, object]
+    state_topics: Mapping[str, object]
+    arm_message_names: tuple[str, ...]
     calibration: Mapping[str, object]
     camera: Mapping[str, object]
     arms: Mapping[str, object]
@@ -79,6 +81,17 @@ def load_g1_observation_profile(path: str | Path) -> G1ObservationProfile:
     if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension <= 0:
         raise ValueError("Open-RAIL profile state.dimension must be a positive integer")
     layout = state.get("layout") or {}
+    topics = state.get("topics") or {}
+    arm_names = state.get("arm_message_names") or []
+    if not isinstance(arm_names, list) or any(not isinstance(name, str) or not name.strip() for name in arm_names):
+        raise ValueError("state.arm_message_names must be a list of non-empty names")
+    if arm_names and (len(arm_names) != 14 or len(set(arm_names)) != 14):
+        raise ValueError("state.arm_message_names must contain 14 unique names")
+    if not isinstance(topics, dict) or any(
+        not isinstance(name, str) or not isinstance(topic, str) or not topic.strip()
+        for name, topic in topics.items()
+    ):
+        raise ValueError("Open-RAIL profile state.topics must map names to non-empty topics")
     if not isinstance(layout, dict):
         raise ValueError("Open-RAIL profile state.layout must be a mapping")
     for key, bounds in layout.items():
@@ -121,6 +134,8 @@ def load_g1_observation_profile(path: str | Path) -> G1ObservationProfile:
         selected_arm=selected_arm,
         state_dimension=dimension,
         state_layout=_freeze_mapping(layout),
+        state_topics=_freeze_mapping(topics),
+        arm_message_names=tuple(arm_names),
         calibration=_freeze_mapping(calibration),
         camera=_freeze_mapping(camera),
         arms=_freeze_mapping(arms),

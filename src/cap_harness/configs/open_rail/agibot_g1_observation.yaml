@@ -64,6 +64,31 @@ camera:
 
 state:
   dimension: 20
+  # Names observed on the actual /hal/arm_joint_state stream; this does not
+  # establish the mapping to the planner model or verify velocity units.
+  arm_message_names:
+    - left_arm_joint1
+    - left_arm_joint2
+    - left_arm_joint3
+    - left_arm_joint4
+    - left_arm_joint5
+    - left_arm_joint6
+    - left_arm_joint7
+    - right_arm_joint1
+    - right_arm_joint2
+    - right_arm_joint3
+    - right_arm_joint4
+    - right_arm_joint5
+    - right_arm_joint6
+    - right_arm_joint7
+  # SDK default feedback topics. Direct sample collection is opt-in until
+  # the site verifies its message names, units, QoS, and clock alignment.
+  topics:
+    arm: /hal/arm_joint_state
+    head: /hal/neck_state
+    waist: /hal/waist_state
+    gripper_left: /hal/left_ee_data
+    gripper_right: /hal/right_ee_data
   layout:
     left_arm_rad: [0, 7]
     right_arm_rad: [7, 14]

@@ -77,6 +77,22 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
 
 - The local CAP MCP tool graph is not available in this session, so no registered
   robot observation or control command can be issued here.
+- On 2026-11-10, read-only G1 capture with a separate DDS subscriber node
+  obtained bound values and timestamps for arm, head, waist and both grippers,
+  alongside RGB and raw depth. Three saved snapshots passed a **configured,
+  experimental** 50 ms timestamp-window check; the camera/depth difference
+  ranged from -18.37 to +12.85 ms. The clock domains and an acceptable motion
+  skew have not been independently verified. Two later samples preserve the raw
+  arm velocity field, which has 7 values while the message contains 14 named arm
+  positions. Its side, ordering and units are unverified, so it cannot populate
+  the 14-velocity CAP state. No motion was commanded. See
+  `artifacts/open_rail/bound_state_named_probe_20261110/` and
+  `artifacts/open_rail/bound_state_raw_velocity_20261110/`. The SDK rejects a
+  second subscription to the same topic on the original node; the failed
+  attempts are retained under `bound_state_series_20261110` and
+  `bound_state_node_probe_20261110`. The observation worker required forced
+  termination after the normal close timeout and emitted shared-memory tracker
+  warnings; no robot command was sent to recover it.
 - `/run/a2d-control-manager/state.json` reports scene `develop` and `active: null`.
   The A2D mode-switch service is running. No StarVLA inference or Open-RAIL robot
   client process was found during the baseline check.
@@ -184,6 +200,13 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   for execution. Optional attached-object spheres do not by themselves establish
   collision clearance for a grasp or lift. Offline evidence is under
   `artifacts/open_rail/a2d_curobo_candidate_20261109/`.
+- An offline comparison on the same saved state and a synthetic scene found
+  `start_self_collision` when only adjacent links were excluded. Using the
+  installed SRDF's `Adjacent`, `Never` and `Default` exclusions allowed the
+  same 0.005 rad joint-space probe to return a trajectory. This isolates the
+  effect of the exclusion list; it does not establish that those exclusions or
+  the resulting trajectory are safe on the physical robot. Evidence is in
+  `artifacts/open_rail/a2d_curobo_collision_audit_20261110/`.
 - On Orin, the isolated cuRobo CUDA 12.2 environment successfully planned a
   generic Franka motion through the ASPIRE HTTP client, including a separate
   test with a synthetic attached sphere. Logs and scripts are in

@@ -99,6 +99,61 @@ class RobotBody(_OpenRailG1Body):
         # Read depth by packet below so it remains uint16 and is not color-flipped.
         self._non_ref_cameras = []
         self._right_arm_controller = None
+        self._bound_state_samples = None
+        self._bound_state_node = None
+        self._bound_state_subscribers = []
+        if self.config.get("bound_state_sampling", False) is True:
+            self._install_bound_state_subscriptions()
+
+    def _install_bound_state_subscriptions(self) -> None:
+        """Use a separate read-only DDS node; the SDK node rejects duplicate topics."""
+        from cosine_bus.agibotdds_py3 import agibotdds
+        from sensor_msgs_pb.msg.JointState_pb2 import JointState
+        from genie_msgs_pb.msg.EndState_pb2 import EndState
+        from genie_msgs_pb.msg.HeadState_pb2 import HeadState
+        from genie_msgs_pb.msg.WaistState_pb2 import WaistState
+        from cap_harness.open_rail.g1_state_samples import G1StateSamples
+
+        samples = G1StateSamples(tuple(self.config.bound_arm_message_names))
+
+        def guarded(callback):
+            reported_errors = set()
+            def on_message(message):
+                try:
+                    callback(message)
+                except (AttributeError, IndexError, TypeError, ValueError) as exc:
+                    error = str(exc)
+                    if error not in reported_errors:
+                        reported_errors.add(error)
+                        self.logger.warning("discarding invalid bound G1 state sample: %s", error)
+            return on_message
+
+        topics = self.config.bound_state_topics
+        subscriptions = (
+            (topics["arm"], JointState, samples.arm),
+            (topics["head"], HeadState, samples.head),
+            (topics["waist"], WaistState, samples.waist),
+            (topics["gripper_left"], EndState, lambda message: samples.gripper("left", message)),
+            (topics["gripper_right"], EndState, lambda message: samples.gripper("right", message)),
+        )
+        node = agibotdds.Node("ASPIRE_G1_State")
+        subscribers = [
+            node.create_subscriber(topic, message_type, self.robot.qos, guarded(callback))
+            for topic, message_type, callback in subscriptions
+        ]
+        if any(subscriber is None for subscriber in subscribers):
+            raise RuntimeError("failed to subscribe to all G1 state feedback topics")
+        self._bound_state_node = node
+        self._bound_state_subscribers = subscribers
+        self._bound_state_samples = samples
+
+    def close(self) -> None:
+        # No publishers are created on this node. Clear references before the
+        # upstream closes its own robot/camera connection.
+        self._bound_state_subscribers = []
+        self._bound_state_node = None
+        self._bound_state_samples = None
+        super().close()
 
     def _require_physical_motion(self) -> None:
         if self.config.get("allow_physical_motion", False) is not True:
@@ -185,7 +240,22 @@ class RobotBody(_OpenRailG1Body):
 
         rgb_timestamp_ns = int(observation["ref_timestamp"])
         observation["rgb_timestamp_ns"] = rgb_timestamp_ns
-        observation["state_timestamps_ns"] = self._state_timestamps(rgb_timestamp_ns)
+        bound = (
+            None if self._bound_state_samples is None
+            else self._bound_state_samples.nearest(rgb_timestamp_ns)
+        )
+        if bound is None:
+            observation["state_timestamps_ns"] = self._state_timestamps(rgb_timestamp_ns)
+        else:
+            state, velocity, timestamps = bound
+            observation["obs.state"] = state
+            observation["state_timestamps_ns"] = timestamps
+            observation["state_timestamps_bind_state_values"] = True
+            # Keep names and velocities in one IPC field: Open-RAIL transports
+            # at most 16 non-camera fields per FramePacket.
+            observation["bound_arm_sample"] = {
+                "names": list(self.config.bound_arm_message_names), "velocities_raw": velocity
+            }
 
         rgb_key = f"cam.{self._rgb_camera_key}"
         observation.pop(rgb_key, None)

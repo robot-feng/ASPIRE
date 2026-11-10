@@ -24,6 +24,7 @@ def test_rgbd_calibration_samples_share_runtime_and_preserve_raw_values(tmp_path
             rgb=np.full((2, 3, 3), value, dtype=np.uint8),
             depth_u16=np.full((2, 3), 500 + value, dtype=np.uint16),
             state=np.array([value], dtype=np.float32),
+            arm_velocity_raw=np.arange(7, dtype=np.float32),
             rgb_timestamp_ns=value,
             depth_timestamp_ns=value + 1,
             depth_skew_ns=1,
@@ -65,12 +66,14 @@ def test_rgbd_calibration_samples_share_runtime_and_preserve_raw_values(tmp_path
         sample = tmp_path / f"sample_{index:04d}"
         assert np.all(np.asarray(Image.open(sample / "head_rgb.png")) == value)
         assert np.all(np.load(sample / "head_depth_u16.npy") == 500 + value)
+        np.testing.assert_array_equal(np.load(sample / "arm_velocity_raw.npy"), np.arange(7))
         metadata = json.loads((sample / "snapshot.json").read_text())
         assert metadata["rgb_timestamp_ns"] == value
         assert metadata["depth_timestamp_ns"] == value + 1
         assert metadata["state_timestamps_ns"] == {"head": value + 2}
         assert metadata["depth_scale_m_per_unit"] is None
         assert metadata["is_synchronized"] is False
+        assert metadata["arm_velocity_raw_file"] == "arm_velocity_raw.npy"
 
 
 def test_rgbd_capture_rejects_duplicate_timestamps_without_overwriting(tmp_path, monkeypatch):

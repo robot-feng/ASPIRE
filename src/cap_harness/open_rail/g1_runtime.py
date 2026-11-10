@@ -54,6 +54,8 @@ class OpenRailSnapshot:
     state_timestamps_ns: dict[str, int | None]
     depth_error: str | None
     metadata: dict[str, Any]
+    arm_velocities_rad_s: np.ndarray | None = None
+    arm_velocity_raw: np.ndarray | None = None
 
     @property
     def depth_skew_ns(self) -> int | None:
@@ -68,10 +70,14 @@ class OpenRailSnapshot:
         if self.metadata.get("state_timestamps_bind_state_values") is not True:
             return False
         threshold_ms = self.metadata.get("maximum_rgb_depth_skew_ms")
-        if threshold_ms is None or self.depth_timestamp_ns is None:
+        if (
+            threshold_ms is None or self.depth_timestamp_ns is None
+            or self.depth_u16 is None or self.depth_error is not None
+        ):
             return False
-        if not self.state_timestamps_ns or any(
-            value is None for value in self.state_timestamps_ns.values()
+        required = {"arm", "head", "waist", "gripper_left", "gripper_right"}
+        if set(self.state_timestamps_ns) != required or any(
+            value is None or value <= 0 for value in self.state_timestamps_ns.values()
         ):
             return False
         maximum_skew_ns = max(
@@ -89,6 +95,9 @@ class OpenRailG1ObservationRuntime:
     it is not converted to ASPIRE's calibrated ``CameraObservation`` until the
     missing depth scale, registration and camera/base transform are verified.
     ``command_runtime`` supplies a scoped facade, interlocked by default.
+    ``bound_state_sampling`` optionally subscribes to the configured state
+    topics in the same worker. It is disabled by default pending site-specific
+    verification of topic names, units, message schemas and clock alignment.
     """
 
     def __init__(
@@ -100,9 +109,13 @@ class OpenRailG1ObservationRuntime:
         allow_physical_motion: bool = False,
         selected_arm: str | None = None,
         calibration_camera_keys: Sequence[str] = (),
+        bound_state_sampling: bool = False,
         proxy: Any | None = None,
     ) -> None:
         self.open_rail_root = Path(open_rail_root).resolve()
+        if type(bound_state_sampling) is not bool:
+            raise ValueError("bound_state_sampling must be a bool")
+        self.bound_state_sampling = bound_state_sampling
         if profile is None:
             profile = default_g1_observation_profile_path()
         self.profile = (
@@ -110,6 +123,12 @@ class OpenRailG1ObservationRuntime:
             if isinstance(profile, str | Path)
             else profile
         )
+        if bound_state_sampling and set(self.profile.state_topics) != {
+            "arm", "head", "waist", "gripper_left", "gripper_right"
+        }:
+            raise ValueError("bound G1 state sampling requires five configured feedback topics")
+        if bound_state_sampling and len(self.profile.arm_message_names) != 14:
+            raise ValueError("bound G1 state sampling requires the arm message joint names")
         if self.profile.rgb_channel != f"cam.{self.profile.public_camera_key}":
             raise ValueError("rgb_channel must match cam.<public_camera_key>")
         if (
@@ -149,7 +168,11 @@ class OpenRailG1ObservationRuntime:
         self.selected_arm = configured_selected_arm
         self._last_snapshot: OpenRailSnapshot | None = None
         self._command_runtime: OpenRailG1CommandRuntime | None = None
-        if maximum_rgb_depth_skew_ms is not None and maximum_rgb_depth_skew_ms <= 0:
+        if maximum_rgb_depth_skew_ms is not None and (
+            isinstance(maximum_rgb_depth_skew_ms, bool)
+            or not np.isfinite(maximum_rgb_depth_skew_ms)
+            or maximum_rgb_depth_skew_ms <= 0
+        ):
             raise ValueError("maximum_rgb_depth_skew_ms must be positive")
         self._closed = False
         self._proxy = proxy or self._create_proxy()
@@ -174,6 +197,9 @@ class OpenRailG1ObservationRuntime:
             raise OpenRailG1ObservationError("Open-RAIL G1 dependencies are not importable") from exc
 
         config = config_factory()
+        config.bound_state_sampling = self.bound_state_sampling
+        config.bound_state_topics = dict(self.profile.state_topics)
+        config.bound_arm_message_names = list(self.profile.arm_message_names)
         config.camera.ref = self.profile.public_camera_key
         config.camera.names = {
             self.profile.public_camera_key: self.profile.rgb_channel.removeprefix("cam."),
@@ -454,6 +480,21 @@ class OpenRailG1ObservationRuntime:
             str(name): None if stamp is None else int(stamp)
             for name, stamp in (observation.get("state_timestamps_ns") or {}).items()
         }
+        bound_arm = observation.get("bound_arm_sample")
+        if bound_arm is not None and not isinstance(bound_arm, Mapping):
+            raise OpenRailG1ObservationError("bound arm sample must be a mapping")
+        raw_velocity = None if bound_arm is None else bound_arm.get("velocities_raw")
+        velocity = None
+        if raw_velocity is not None:
+            if observation.get("state_timestamps_bind_state_values") is not True:
+                raise OpenRailG1ObservationError("arm velocity requires a bound arm message")
+            raw_velocity = np.asarray(raw_velocity, dtype=np.float32)
+            if raw_velocity.ndim != 1 or not 1 <= len(raw_velocity) <= 14 or not np.all(np.isfinite(raw_velocity)):
+                raise OpenRailG1ObservationError("expected 1 to 14 finite raw arm velocities")
+            raw_velocity = raw_velocity.copy()
+            raw_velocity.setflags(write=False)
+            if len(raw_velocity) == 14:
+                velocity = raw_velocity
         raw_depth_stamp = observation.get("depth_timestamp_ns")
         depth_timestamp = None if raw_depth_stamp is None else int(raw_depth_stamp)
         calibration = _plain(self.profile.calibration)
@@ -475,6 +516,11 @@ class OpenRailG1ObservationRuntime:
             "depth_scale_m_per_unit": calibration.get("depth_scale_m_per_unit"),
             "depth_registered_to_rgb": calibration.get("depth_registered_to_rgb"),
             "state_layout": dict(self.profile.state_layout),
+            "arm_joint_names": (
+                tuple(bound_arm["names"])
+                if bound_arm is not None and isinstance(bound_arm.get("names"), (list, tuple))
+                else None
+            ),
             # False by default: a body may set this only when the state values
             # and their per-group timestamps came from the same DDS samples.
             "state_timestamps_bind_state_values": (
@@ -498,6 +544,8 @@ class OpenRailG1ObservationRuntime:
             state_timestamps_ns=state_stamps,
             depth_error=observation.get("depth_error"),
             metadata=metadata,
+            arm_velocities_rad_s=velocity,
+            arm_velocity_raw=raw_velocity,
         )
 
     def close(self) -> None:
