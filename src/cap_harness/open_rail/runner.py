@@ -11,10 +11,12 @@ from pathlib import Path
 
 from cap_harness.api import CapApi
 from cap_harness.artifacts import RunRecorder, TracedProvider
+from cap_harness.contracts import GraspSet, PlanningScene
 from cap_harness.open_rail.adapter import OpenRailAdapter
 from cap_harness.providers.curobo.client import CuRoboProvider, DEFAULT_CUROBO_URL
 from cap_harness.providers.depth_refined import DepthRefinedSegmentationProvider
 from cap_harness.providers.graspgenx.client import DEFAULT_GRASPGENX_URL, GraspGenXProvider
+from cap_harness.providers.graspgenx.preview import write_grasp_preview
 from cap_harness.providers.wevisone.client import DEFAULT_WEVISONE_URL, WeVisOneProvider
 from cap_harness.run import run_program_with_api
 from cap_harness.runtime import ProgramExecutionResult
@@ -85,7 +87,21 @@ def run_apple_preview(
         default_camera=config["camera_name"],
         recorder=recorder,
     )
-    return run_program_with_api(api=api, program_path=program_path, recorder=recorder)
+    result = run_program_with_api(api=api, program_path=program_path, recorder=recorder)
+    if result.ok and isinstance(result.result, Mapping):
+        grasps = result.result.get("preview_grasps")
+        scene = result.result.get("preview_scene")
+        if isinstance(grasps, GraspSet) and grasps.ok and isinstance(scene, PlanningScene):
+            # Both objects come from the same observation used by the program.
+            # The PLY is evidence for inspection, never proof of collision clearance.
+            write_grasp_preview(
+                recorder.root / "media/grasp-candidates.ply",
+                scene.point_cloud,
+                grasps,
+                snapshot_id=grasps.diagnostics.get("snapshot_id"),
+                timestamp_s=grasps.diagnostics.get("camera_timestamp_s"),
+            )
+    return result
 
 
 __all__ = ["run_apple_preview"]

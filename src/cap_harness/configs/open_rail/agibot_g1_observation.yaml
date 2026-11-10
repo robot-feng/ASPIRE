@@ -89,6 +89,8 @@ state:
     waist: /hal/waist_state
     gripper_left: /hal/left_ee_data
     gripper_right: /hal/right_ee_data
+    arm_left: /hal/left_arm_data
+    arm_right: /hal/right_arm_data
   layout:
     left_arm_rad: [0, 7]
     right_arm_rad: [7, 14]

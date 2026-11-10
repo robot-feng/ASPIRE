@@ -50,6 +50,10 @@ finalizes the recorder. No model service or policy process is started by this
 function. The inputs are not proof of physical calibration. The current code
 does not yet construct a calibrated G1 control facade; contact, lift, holding
 verification and a complete execution launcher remain to be integrated.
+When candidate generation succeeds, the recorder also writes
+`media/grasp-candidates.ply` with the observed scene, framed candidate axes,
+and approach directions. It is a visualization, not a collision or reachability
+certificate, and does not depict a guessed physical gripper.
 
 `HoldVerifier` compares a post-close baseline with timestamped observations
 during and after the lift. It requires the object to rise with the tool and

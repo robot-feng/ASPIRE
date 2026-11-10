@@ -570,6 +570,9 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
             return (np.arange(20, dtype=np.float32), np.arange(14, dtype=np.float32),
                     {name: 99 for name in ("arm", "head", "waist", "gripper_left", "gripper_right")})
 
+        def nearest_sides(self, timestamp):
+            return {}
+
     body._bound_state_samples = BoundSamples()
     body.config.bound_arm_message_names = body.robot.arm_joint_names
     bound_observation = body.retrieve_observation()
@@ -657,7 +660,8 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
         package.__path__ = []
         monkeypatch.setitem(sys.modules, package_name, package)
     for package, message_name in (("sensor_msgs_pb", "JointState"), ("genie_msgs_pb", "EndState"),
-                                  ("genie_msgs_pb", "HeadState"), ("genie_msgs_pb", "WaistState")):
+                                  ("genie_msgs_pb", "HeadState"), ("genie_msgs_pb", "WaistState"),
+                                  ("genie_msgs_pb", "ArmState")):
         name = f"{package}.msg.{message_name}_pb2"
         fake_module = ModuleType(name)
         setattr(fake_module, message_name, type(message_name, (), {}))
@@ -682,6 +686,7 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     monkeypatch.setitem(sys.modules, "cosine_bus.agibotdds_py3", fake_dds_package)
     body.logger = logging.getLogger(__name__)
     body.config.bound_state_topics = {name: name for name in ("arm", "head", "waist", "gripper_left", "gripper_right")}
+    body.config.bound_state_topics.update({"arm_left": "arm_left", "arm_right": "arm_right"})
     body.config.bound_arm_message_names = names
     body._install_bound_state_subscriptions()
     stamp = SimpleNamespace(sec=0, nanosec=100)
@@ -694,7 +699,12 @@ def test_body_uses_configured_depth_key_and_sdk_channel_without_hardware(
     callbacks["waist"](SimpleNamespace(header=header, name=["joint_body_pitch", "joint_lift_body"], motor_states=[motor(0), motor(0)]))
     for side in ("left", "right"):
         callbacks[f"gripper_{side}"](SimpleNamespace(header=header, type=2, end_state=[motor(60)]))
+        callbacks[f"arm_{side}"](SimpleNamespace(
+            header=header,
+            motor_states=[SimpleNamespace(id=i, position=i / 10, velocity=i / 100) for i in range(7)],
+        ))
     bound_observation = body.retrieve_observation()
     assert bound_observation["state_timestamps_bind_state_values"] is True
     np.testing.assert_allclose(bound_observation["obs.state"], [*range(14), 0.5, 0.5, 0, 0, 0, 0])
     np.testing.assert_allclose(bound_observation["bound_arm_sample"]["velocities_raw"], [0.1] * 14)
+    assert bound_observation["bound_arm_sample"]["sides"]["right"]["motor_ids"] == list(range(7))

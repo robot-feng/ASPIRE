@@ -155,6 +155,9 @@ def test_preview_wires_real_clients_and_reuses_one_snapshot(
     assert calls[2][1]["model"] == "agibot_g1"
     assert control.commands == []
     assert list(recorder.root.glob("trace/calls/*wevisone-segment-text/output.json"))
+    preview = (recorder.root / "media/grasp-candidates.ply").read_text()
+    assert '"snapshot_id":"head_optical@12.000000000"' in preview
+    assert '"collision_checked":false' in preview
     recorder.finalize(program_ok=True, task_success=False, termination_reason="program_completed",
                       program_result=None)
 

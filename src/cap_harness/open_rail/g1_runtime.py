@@ -123,9 +123,9 @@ class OpenRailG1ObservationRuntime:
             if isinstance(profile, str | Path)
             else profile
         )
-        if bound_state_sampling and set(self.profile.state_topics) != {
+        if bound_state_sampling and not {
             "arm", "head", "waist", "gripper_left", "gripper_right"
-        }:
+        }.issubset(self.profile.state_topics):
             raise ValueError("bound G1 state sampling requires five configured feedback topics")
         if bound_state_sampling and len(self.profile.arm_message_names) != 14:
             raise ValueError("bound G1 state sampling requires the arm message joint names")
@@ -521,6 +521,7 @@ class OpenRailG1ObservationRuntime:
                 if bound_arm is not None and isinstance(bound_arm.get("names"), (list, tuple))
                 else None
             ),
+            "arm_side_feedback": None if bound_arm is None else bound_arm.get("sides"),
             # False by default: a body may set this only when the state values
             # and their per-group timestamps came from the same DDS samples.
             "state_timestamps_bind_state_values": (

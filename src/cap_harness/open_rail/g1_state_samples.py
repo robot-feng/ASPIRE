@@ -25,6 +25,7 @@ class G1StateSamples:
             name: deque(maxlen=capacity)
             for name in ("arm", "head", "waist", "gripper_left", "gripper_right")
         }
+        self._side_groups = {side: deque(maxlen=capacity) for side in ("left", "right")}
 
     @staticmethod
     def _timestamp(message: Any) -> int:
@@ -72,6 +73,33 @@ class G1StateSamples:
         if not np.isfinite(value) or not 0.0 <= value <= 120.0:
             raise ValueError("gripper feedback lies outside the SDK's 0..120 range")
         self._append(f"gripper_{side}", self._timestamp(message), (value / 120.0,))
+
+    def arm_side(self, side: str, message: Any) -> None:
+        """Retain source motor IDs, position and velocity without assigning joint order."""
+        if side not in self._side_groups or len(message.motor_states) != 7:
+            raise ValueError("arm feedback must identify one side with seven motors")
+        motors = tuple(message.motor_states)
+        ids = tuple(int(motor.id) for motor in motors)
+        positions = tuple(float(motor.position) for motor in motors)
+        velocities = tuple(float(motor.velocity) for motor in motors)
+        if not np.isfinite(positions).all() or not np.isfinite(velocities).all():
+            raise ValueError("arm feedback contains non-finite values")
+        sample = (self._timestamp(message), ids, positions, velocities)
+        with self._lock:
+            self._side_groups[side].append(sample)
+
+    def nearest_sides(self, timestamp_ns: int) -> dict[str, dict[str, object]]:
+        """Return per-side raw feedback; it is not merged into the CAP state."""
+        with self._lock:
+            chosen = {
+                side: min(group, key=lambda sample: abs(sample[0] - timestamp_ns))
+                for side, group in self._side_groups.items() if group
+            }
+        return {
+            side: {"timestamp_ns": sample[0], "motor_ids": list(sample[1]),
+                   "positions_raw": list(sample[2]), "velocities_raw": list(sample[3])}
+            for side, sample in chosen.items()
+        }
 
     def nearest(self, timestamp_ns: int) -> tuple[np.ndarray, np.ndarray | None, dict[str, int]] | None:
         """Return 20 positions and optional 14 arm velocities from bound messages."""

@@ -112,6 +112,7 @@ class RobotBody(_OpenRailG1Body):
         from genie_msgs_pb.msg.EndState_pb2 import EndState
         from genie_msgs_pb.msg.HeadState_pb2 import HeadState
         from genie_msgs_pb.msg.WaistState_pb2 import WaistState
+        from genie_msgs_pb.msg.ArmState_pb2 import ArmState
         from cap_harness.open_rail.g1_state_samples import G1StateSamples
 
         samples = G1StateSamples(tuple(self.config.bound_arm_message_names))
@@ -129,13 +130,17 @@ class RobotBody(_OpenRailG1Body):
             return on_message
 
         topics = self.config.bound_state_topics
-        subscriptions = (
+        subscriptions = [
             (topics["arm"], JointState, samples.arm),
             (topics["head"], HeadState, samples.head),
             (topics["waist"], WaistState, samples.waist),
             (topics["gripper_left"], EndState, lambda message: samples.gripper("left", message)),
             (topics["gripper_right"], EndState, lambda message: samples.gripper("right", message)),
-        )
+        ]
+        for side in ("left", "right"):
+            topic = topics.get(f"arm_{side}")
+            if topic:
+                subscriptions.append((topic, ArmState, lambda message, side=side: samples.arm_side(side, message)))
         node = agibotdds.Node("ASPIRE_G1_State")
         subscribers = [
             node.create_subscriber(topic, message_type, self.robot.qos, guarded(callback))
@@ -254,7 +259,8 @@ class RobotBody(_OpenRailG1Body):
             # Keep names and velocities in one IPC field: Open-RAIL transports
             # at most 16 non-camera fields per FramePacket.
             observation["bound_arm_sample"] = {
-                "names": list(self.config.bound_arm_message_names), "velocities_raw": velocity
+                "names": list(self.config.bound_arm_message_names), "velocities_raw": velocity,
+                "sides": self._bound_state_samples.nearest_sides(rgb_timestamp_ns),
             }
 
         rgb_key = f"cam.{self._rgb_camera_key}"

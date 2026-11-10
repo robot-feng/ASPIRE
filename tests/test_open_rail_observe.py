@@ -56,11 +56,12 @@ def test_rgbd_calibration_samples_share_runtime_and_preserve_raw_values(tmp_path
     monkeypatch.setattr(
         sys,
         "argv",
-        ["observe", "--output", str(tmp_path), "--samples", "2", "--interval", "1", "--require-depth"],
+        ["observe", "--output", str(tmp_path), "--samples", "2", "--interval", "1", "--require-depth", "--bound-state-sampling"],
     )
 
     assert observe.main() == 0
     assert [event[0] for event in events] == ["init", "read", "interval", "read", "close"]
+    assert events[0][1]["bound_state_sampling"] is True
     assert events[1][1]["require_depth"] is True
     for index, value in enumerate((10, 20), 1):
         sample = tmp_path / f"sample_{index:04d}"

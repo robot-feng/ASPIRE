@@ -93,6 +93,15 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   `bound_state_node_probe_20261110`. The observation worker required forced
   termination after the normal close timeout and emitted shared-memory tracker
   warnings; no robot command was sent to recover it.
+- The active `a2d_v01` configuration subscribes to separate
+  `/hal/left_arm_data` and `/hal/right_arm_data` topics. A subsequent read-only
+  capture retained each message's timestamp, seven motor IDs, positions and
+  velocities without using them for motion or substituting them into CAP state.
+  In one stationary snapshot both sides reported IDs 0–6; compared in array
+  order, their positions differed from the 14-value joint message by at most
+  0.000036 on the left and zero on the right. This does not establish joint-ID
+  correspondence, velocity units or behavior during motion. See
+  `artifacts/open_rail/bound_state_arm_sides_20261110/`.
 - `/run/a2d-control-manager/state.json` reports scene `develop` and `active: null`.
   The A2D mode-switch service is running. No StarVLA inference or Open-RAIL robot
   client process was found during the baseline check.

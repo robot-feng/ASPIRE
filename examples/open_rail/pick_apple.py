@@ -116,9 +116,12 @@ def plan_apple_pregrasp():
                 "candidate": candidate,
                 "pregrasp_pose": pose,
                 "trajectory": plan.trajectory,
+                "preview_grasps": grasps,
+                "preview_scene": scene,
             }
         failures.append("collision-checked pregrasp planning failed")
-    return {"ok": False, "stage": "pregrasp_planning", "failures": failures}
+    return {"ok": False, "stage": "pregrasp_planning", "failures": failures,
+            "preview_grasps": grasps, "preview_scene": scene}
 
 
 result = plan_apple_pregrasp()

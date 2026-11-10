@@ -59,3 +59,16 @@ def test_unexpected_joint_names_and_non_gripper_feedback_are_rejected() -> None:
         samples.gripper("right", _message(1, type=1, end_state=[_motor(1)]))
     with pytest.raises(ValueError, match="invalid DDS"):
         samples.arm(_message(0, name=ARMS, position=[0] * 14, velocity=[0] * 14))
+
+
+def test_side_feedback_retains_ids_and_raw_values_without_assuming_mapping() -> None:
+    samples = G1StateSamples(ARMS)
+    motors = [NS(id=100 + i, position=i * 0.1, velocity=i * 0.01) for i in range(7)]
+    samples.arm_side("right", _message(1_000_000_000, motor_states=motors))
+    motors[0].position = 99
+    side = samples.nearest_sides(1_000_000_001)
+    assert set(side) == {"right"}
+    assert side["right"]["motor_ids"] == list(range(100, 107))
+    assert side["right"]["positions_raw"][0] == 0
+    assert side["right"]["velocities_raw"][1] == pytest.approx(0.01)
+    assert side["right"]["timestamp_ns"] == 1_000_000_000
