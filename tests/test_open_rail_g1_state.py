@@ -5,7 +5,11 @@ import pytest
 
 from cap_harness.contracts import Pose
 from cap_harness.open_rail.g1_runtime import OpenRailG1ObservationError, OpenRailSnapshot
-from cap_harness.open_rail.g1_state import G1StateKinematics, robot_state_from_snapshot
+from cap_harness.open_rail.g1_state import (
+    G1ArmSideFeedbackCalibration,
+    G1StateKinematics,
+    robot_state_from_snapshot,
+)
 from cap_harness.open_rail.robot_profile import OpenRailProfile
 
 
@@ -82,3 +86,101 @@ def test_robot_state_accepts_only_explicitly_verified_wire_to_profile_order() ->
     state = robot_state_from_snapshot(snapshot, _profile(), replace(_kinematics(), wire_joint_names=wire))
     assert state.joint_names["right"] == _profile().joint_names["right"]
     np.testing.assert_array_equal(state.joint_positions["right"], np.arange(7, 14))
+
+
+def _side_calibration():
+    return G1ArmSideFeedbackCalibration(
+        motor_id_to_joint={side: dict(zip(range(20, 27), _profile().joint_names[side])) for side in ("left", "right")},
+        motor_id_mapping_verified=True, position_unit="rad", velocity_unit="rad/s", units_verified=True,
+        timestamps_share_clock_verified=True, max_timestamp_skew_ns=2_000_000,
+        max_sample_age_ns=3_000_000, max_position_error_rad=0.01,
+    )
+
+
+def _side_snapshot():
+    snapshot = _snapshot()
+    # The wire order is deliberately unrelated to ID order: mapping must be used.
+    order = [5, 1, 4, 2, 3, 6, 0]
+    sides = {}
+    for start, side in ((0, "left"), (7, "right")):
+        sides[side] = {
+            "timestamp_ns": 1_000_100_000,
+            "motor_ids": [20 + i for i in order],
+            "positions_raw": [float(start + i) for i in order],
+            "velocities_raw": [float(start + i + 1) / 10 for i in order],
+        }
+    return replace(snapshot, arm_velocities_rad_s=None,
+                   metadata={**snapshot.metadata, "arm_side_feedback": sides})
+
+
+def test_explicit_side_feedback_maps_each_id_to_joint_and_preserves_combined_positions() -> None:
+    state = robot_state_from_snapshot(
+        _side_snapshot(), _profile(), _kinematics(), side_feedback=_side_calibration(),
+        reference_timestamp_ns=1_001_000_000,
+    )
+    np.testing.assert_array_equal(state.joint_positions["right"], np.arange(7, 14))
+    np.testing.assert_allclose(state.joint_velocities["left"], np.arange(1, 8) / 10)
+    np.testing.assert_allclose(state.joint_velocities["right"], np.arange(8, 15) / 10)
+    assert state.timestamp_s == 1.0
+
+
+@pytest.mark.parametrize("field", ["motor_id_mapping_verified", "units_verified", "timestamps_share_clock_verified"])
+def test_side_feedback_requires_each_verification(field) -> None:
+    with pytest.raises(OpenRailG1ObservationError, match="requires verified"):
+        robot_state_from_snapshot(_side_snapshot(), _profile(), _kinematics(),
+                                  side_feedback=replace(_side_calibration(), **{field: False}),
+                                  reference_timestamp_ns=1_001_000_000)
+
+
+@pytest.mark.parametrize("changes", [
+    {"position_unit": "deg"}, {"velocity_unit": "unknown"},
+    {"max_timestamp_skew_ns": -1}, {"max_sample_age_ns": True},
+    {"max_position_error_rad": float("nan")}, {"max_position_error_rad": -1.0},
+])
+def test_side_feedback_rejects_unspecified_or_invalid_units_and_thresholds(changes) -> None:
+    with pytest.raises(OpenRailG1ObservationError):
+        robot_state_from_snapshot(_side_snapshot(), _profile(), _kinematics(),
+                                  side_feedback=replace(_side_calibration(), **changes),
+                                  reference_timestamp_ns=1_001_000_000)
+
+
+def test_side_feedback_rejects_missing_unmapped_duplicate_and_inconsistent_samples() -> None:
+    snapshot = _side_snapshot()
+    sides = snapshot.metadata["arm_side_feedback"]
+    cases = [
+        {"left": sides["left"]},
+        {**sides, "right": {**sides["right"], "motor_ids": [20] * 7}},
+        {**sides, "right": {**sides["right"], "motor_ids": [20, 21, 22, 23, 24, 25, 99]}},
+        {**sides, "right": {**sides["right"], "velocities_raw": [0] * 6}},
+        {**sides, "right": {**sides["right"], "positions_raw": [float("nan")] * 7}},
+        {**sides, "right": {**sides["right"], "positions_raw": [0] * 7}},
+    ]
+    for case in cases:
+        broken = replace(snapshot, metadata={**snapshot.metadata, "arm_side_feedback": case})
+        with pytest.raises(OpenRailG1ObservationError):
+            robot_state_from_snapshot(broken, _profile(), _kinematics(), side_feedback=_side_calibration(),
+                                      reference_timestamp_ns=1_001_000_000)
+    bad_mapping = {**_side_calibration().motor_id_to_joint, "right": {20: _profile().joint_names["right"][0]}}
+    with pytest.raises(OpenRailG1ObservationError, match="bijectively"):
+        robot_state_from_snapshot(snapshot, _profile(), _kinematics(),
+                                  side_feedback=replace(_side_calibration(), motor_id_to_joint=bad_mapping),
+                                  reference_timestamp_ns=1_001_000_000)
+    # Explicit side mode must fail closed, even when a combined velocity exists.
+    with pytest.raises(OpenRailG1ObservationError, match="bijectively"):
+        robot_state_from_snapshot(replace(snapshot, arm_velocities_rad_s=np.zeros(14)), _profile(), _kinematics(),
+                                  side_feedback=replace(_side_calibration(), motor_id_to_joint=bad_mapping),
+                                  reference_timestamp_ns=1_001_000_000)
+
+
+def test_side_feedback_rejects_excess_skew_stale_and_future_data() -> None:
+    snapshot = _side_snapshot()
+    sides = snapshot.metadata["arm_side_feedback"]
+    bad_side = {**sides, "right": {**sides["right"], "timestamp_ns": 1_003_000_000}}
+    snapshot_skew = replace(snapshot, metadata={**snapshot.metadata, "arm_side_feedback": bad_side})
+    with pytest.raises(OpenRailG1ObservationError, match="skew"):
+        robot_state_from_snapshot(snapshot_skew, _profile(), _kinematics(), side_feedback=_side_calibration(),
+                                  reference_timestamp_ns=1_003_000_000)
+    for now in (None, 1_000_050_000, 1_004_000_001):
+        with pytest.raises(OpenRailG1ObservationError):
+            robot_state_from_snapshot(snapshot, _profile(), _kinematics(), side_feedback=_side_calibration(),
+                                      reference_timestamp_ns=now)
