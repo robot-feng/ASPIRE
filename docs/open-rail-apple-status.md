@@ -102,6 +102,14 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   0.000036 on the left and zero on the right. This does not establish joint-ID
   correspondence, velocity units or behavior during motion. See
   `artifacts/open_rail/bound_state_arm_sides_20261110/`.
+- A later read-only `--broadcast` probe collected three RGB-D frames through
+  one Open-RAIL proxy and saved a right-arm seven-ID position/velocity sample
+  and right-gripper sample from the parent feedback buffer. These are raw
+  post-acquisition records, not command-completion evidence. The first frame
+  may precede bound feedback; no command was sent. Source and feedback evidence
+  are in `artifacts/open_rail/broadcast_feedback_probe_20261110/`. The
+  upstream worker again needed termination after its normal close timeout and
+  produced shared-memory tracker warnings.
 - `/run/a2d-control-manager/state.json` reports scene `develop` and `active: null`.
   The A2D mode-switch service is running. No StarVLA inference or Open-RAIL robot
   client process was found during the baseline check.

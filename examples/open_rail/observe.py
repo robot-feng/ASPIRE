@@ -60,6 +60,10 @@ def main() -> int:
         "--bound-state-sampling", action="store_true",
         help="subscribe to individual DDS state messages for read-only timing diagnostics",
     )
+    parser.add_argument(
+        "--broadcast", action="store_true",
+        help="share the read-only runtime's snapshots with its feedback buffer",
+    )
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--interval", type=float, default=2.5, help="seconds between samples")
     args = parser.parse_args()
@@ -67,6 +71,8 @@ def main() -> int:
         parser.error("--samples must be positive")
     if not math.isfinite(args.interval) or args.interval < 0:
         parser.error("--interval must be finite and nonnegative")
+    if args.broadcast and not args.bound_state_sampling:
+        parser.error("--broadcast requires --bound-state-sampling")
 
     args.output.mkdir(parents=True, exist_ok=True)
     with OpenRailG1ObservationRuntime(
@@ -74,22 +80,44 @@ def main() -> int:
         maximum_rgb_depth_skew_ms=args.maximum_skew_ms,
         bound_state_sampling=args.bound_state_sampling,
     ) as runtime:
-        last_timestamp = None
-        for index in range(1, args.samples + 1):
-            if index > 1:
-                time.sleep(args.interval)
-            snapshot = runtime.read_snapshot(timeout_s=args.timeout, require_depth=args.require_depth)
-            if last_timestamp is not None and snapshot.rgb_timestamp_ns <= last_timestamp:
-                raise RuntimeError("RGB snapshot timestamp did not advance")
-            last_timestamp = snapshot.rgb_timestamp_ns
-            output = args.output if args.samples == 1 else args.output / f"sample_{index:04d}"
-            if args.samples > 1:
-                output.mkdir(exist_ok=False)
-            metadata = save_snapshot(snapshot, output)
-            if args.samples == 1:
-                print(json.dumps(metadata, indent=2, sort_keys=True), flush=True)
-            else:
-                print(json.dumps({"sample": str(output), "rgb_timestamp_ns": last_timestamp}), flush=True)
+        broadcaster = None
+        if args.broadcast:
+            from cap_harness.open_rail.g1_broadcast import G1SnapshotBroadcaster
+
+            broadcaster = G1SnapshotBroadcaster(
+                runtime, capture_timeout_s=args.timeout, close_timeout_s=args.timeout + 1,
+            )
+            broadcaster.start()
+        reader = broadcaster or runtime
+        try:
+            last_timestamp = None
+            for index in range(1, args.samples + 1):
+                if index > 1:
+                    time.sleep(args.interval)
+                snapshot = reader.read_snapshot(timeout_s=args.timeout, require_depth=args.require_depth)
+                if last_timestamp is not None and snapshot.rgb_timestamp_ns <= last_timestamp:
+                    raise RuntimeError("RGB snapshot timestamp did not advance")
+                last_timestamp = snapshot.rgb_timestamp_ns
+                output = args.output if args.samples == 1 else args.output / f"sample_{index:04d}"
+                if args.samples > 1:
+                    output.mkdir(exist_ok=False)
+                metadata = save_snapshot(snapshot, output)
+                if args.samples == 1:
+                    print(json.dumps(metadata, indent=2, sort_keys=True), flush=True)
+                else:
+                    print(json.dumps({"sample": str(output), "rgb_timestamp_ns": last_timestamp}), flush=True)
+            if broadcaster is not None:
+                feedback = {
+                    "right_arm": broadcaster.feedback_samples.wait_next_right_arm(0, 0),
+                    "right_gripper": broadcaster.feedback_samples.wait_next_right_gripper(0, 0),
+                    "note": "Raw broadcast samples only; no command or terminal state was checked.",
+                }
+                with (args.output / "broadcast_feedback.json").open("x", encoding="utf-8") as output:
+                    json.dump(feedback, output, indent=2)
+                    output.write("\n")
+        finally:
+            if broadcaster is not None:
+                broadcaster.close()
     return 0
 
 

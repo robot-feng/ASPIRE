@@ -115,3 +115,58 @@ def test_capture_refuses_to_mix_a_new_snapshot_with_an_old_depth_file(tmp_path):
         observe.save_snapshot(SimpleNamespace(), tmp_path)
     assert old_depth.read_bytes() == b"old evidence"
     assert not (tmp_path / "snapshot.json").exists()
+
+
+def test_broadcast_requires_bound_sampling_before_opening_runtime(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["observe", "--output", str(tmp_path), "--broadcast"])
+    with pytest.raises(SystemExit):
+        observe.main()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_capture_uses_one_broadcaster_and_closes_it(tmp_path, monkeypatch):
+    from cap_harness.open_rail import g1_broadcast
+
+    snapshot = SimpleNamespace(
+        rgb=np.zeros((1, 1, 3), dtype=np.uint8), depth_u16=None,
+        state=np.zeros(1), rgb_timestamp_ns=100, depth_timestamp_ns=None,
+        depth_skew_ns=None, state_timestamps_ns={}, is_synchronized=False,
+        depth_error="unavailable", metadata={},
+    )
+    events = []
+
+    class Runtime:
+        def __init__(self, **kwargs):
+            events.append(("runtime", kwargs))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            events.append(("runtime_exit",))
+
+    class Broadcaster:
+        def __init__(self, runtime, **kwargs):
+            events.append(("broadcast", runtime, kwargs))
+            self.feedback_samples = SimpleNamespace(
+                wait_next_right_arm=lambda *_: (100, (0, 1, 2, 3, 4, 5, 6), (0,) * 7, (0,) * 7),
+                wait_next_right_gripper=lambda *_: (100, (0.5,), None),
+            )
+
+        def start(self):
+            events.append(("start",))
+
+        def read_snapshot(self, **kwargs):
+            events.append(("read", kwargs))
+            return snapshot
+
+        def close(self):
+            events.append(("close",))
+
+    monkeypatch.setattr(observe, "OpenRailG1ObservationRuntime", Runtime)
+    monkeypatch.setattr(g1_broadcast, "G1SnapshotBroadcaster", Broadcaster)
+    monkeypatch.setattr(sys, "argv", ["observe", "--output", str(tmp_path), "--broadcast", "--bound-state-sampling"])
+    assert observe.main() == 0
+    assert [event[0] for event in events] == ["runtime", "broadcast", "start", "read", "close", "runtime_exit"]
+    assert (tmp_path / "snapshot.json").is_file()
+    assert json.loads((tmp_path / "broadcast_feedback.json").read_text())["right_arm"][0] == 100

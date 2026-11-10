@@ -482,6 +482,7 @@ class OpenRailG1CommandRuntime:
                     "cancel_confirmed": False,
                     "gripper_topic": G1_RIGHT_GRIPPER_TOPIC,
                     "global_motion_stop_sent": False,
+                    "contact_or_grasp_status": "unknown",
                 },
             )
         if reached is not True:
@@ -497,6 +498,7 @@ class OpenRailG1CommandRuntime:
                     "cancel_confirmed": False,
                     "gripper_topic": G1_RIGHT_GRIPPER_TOPIC,
                     "global_motion_stop_sent": False,
+                    "contact_or_grasp_status": "unknown",
                 },
             )
         self._session_state.mark_complete()

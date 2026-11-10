@@ -45,6 +45,25 @@ A gripper stopping short of its requested closed position may indicate contact;
 the target-position check alone neither confirms a grasp nor provides a safe
 contact-completion signal for a lift.
 
+`G1SnapshotBroadcaster` can explicitly reserve the existing observation runtime's
+single frame reader, start one background reader, and distribute snapshots to
+the read-only observation facade and bound right-arm/gripper feedback to the
+parent-process `G1MeasuredCommandFeedback`. It starts no thread on construction
+and never opens a second camera or sends commands. Feedback waits use a local
+condition variable and the original DDS sample timestamps, so repeated frames
+do not count twice and a short feedback timeout does not wait on the camera or
+a feedback RPC. Closing or a reader error wakes waiters as an error; neither
+indicates that an in-flight command stopped. A blocked reader makes close raise
+after the configured close timeout and keeps the underlying runtime open.
+
+This is a feedback-only bridge, tested offline with a separate synthetic producer
+process. The facade is still read-only and must not be treated as a complete G1
+control implementation. The command **publish** itself still uses RobotProxy's
+synchronous RPC with a fixed timeout; the feedback timeout starts after that RPC
+returns and is not an end-to-end command deadline. Arm-specific cancellation,
+lease expiry and contact/force detection remain unverified. A short gripper
+travel remains an unknown contact/grasp state and latches command uncertainty.
+
 After a command publish attempt, a feedback exception or unconfirmed timeout
 permanently latches that Open-RAIL proxy session as motion-uncertain. Every
 later arm or gripper command is rejected across command facades. Reset, cancel,

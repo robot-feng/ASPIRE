@@ -175,6 +175,8 @@ class OpenRailG1ObservationRuntime:
         ):
             raise ValueError("maximum_rgb_depth_skew_ms must be positive")
         self._closed = False
+        self._snapshot_read_lock = threading.Lock()
+        self._snapshot_owner: threading.Thread | None = None
         self._proxy = proxy or self._create_proxy()
         self._motion_session_state = proxy_motion_session_state(self._proxy)
         self._track_proxy_shared_memory()
@@ -254,6 +256,18 @@ class OpenRailG1ObservationRuntime:
     def read_snapshot(
         self, *, timeout_s: float = 5.0, require_depth: bool = False
     ) -> OpenRailSnapshot:
+        if not self._snapshot_read_lock.acquire(blocking=False):
+            raise OpenRailG1ObservationError("G1 snapshot reader is already in use")
+        try:
+            if self._snapshot_owner is not None and threading.current_thread() is not self._snapshot_owner:
+                raise OpenRailG1ObservationError("G1 snapshot reader belongs to the active broadcaster")
+            return self._read_snapshot(timeout_s=timeout_s, require_depth=require_depth)
+        finally:
+            self._snapshot_read_lock.release()
+
+    def _read_snapshot(
+        self, *, timeout_s: float, require_depth: bool
+    ) -> OpenRailSnapshot:
         if self._closed:
             raise OpenRailG1ObservationError("G1 observation runtime is closed")
         if type(require_depth) is not bool:
@@ -276,6 +290,25 @@ class OpenRailG1ObservationRuntime:
                 needed = "RGB-D frame" if require_depth else "frame"
                 raise TimeoutError(f"no new Open-RAIL G1 {needed} within {timeout:.1f}s")
             threading.Event().wait(0.005)
+
+    def claim_snapshot_reader(self, owner: threading.Thread) -> None:
+        """Reserve the one proxy frame reader for an explicit broadcaster."""
+        if not isinstance(owner, threading.Thread):
+            raise ValueError("snapshot reader owner must be a thread")
+        if not self._snapshot_read_lock.acquire(blocking=False):
+            raise OpenRailG1ObservationError("G1 snapshot reader is already in use")
+        try:
+            if self._closed or self._snapshot_owner is not None:
+                raise OpenRailG1ObservationError("G1 snapshot reader is closed or already reserved")
+            self._snapshot_owner = owner
+        finally:
+            self._snapshot_read_lock.release()
+
+    def release_snapshot_reader(self, owner: threading.Thread) -> None:
+        with self._snapshot_read_lock:
+            if self._snapshot_owner is not owner:
+                raise OpenRailG1ObservationError("only the reserved reader can release G1 snapshots")
+            self._snapshot_owner = None
 
     def capture_calibration_packets(self, *, timeout_s: float = 5.0) -> list[dict[str, Any]]:
         """Capture raw head RGB plus selected fisheye packets from this worker."""
@@ -550,9 +583,16 @@ class OpenRailG1ObservationRuntime:
         )
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        if not self._snapshot_read_lock.acquire(blocking=False):
+            raise OpenRailG1ObservationError("cannot close while the G1 snapshot reader is active")
+        try:
+            if self._snapshot_owner is not None:
+                raise OpenRailG1ObservationError("close the G1 snapshot broadcaster first")
+            if self._closed:
+                return
+            self._closed = True
+        finally:
+            self._snapshot_read_lock.release()
         stop_observe = getattr(self._proxy, "stop_observe", None)
         if callable(stop_observe):
             try:

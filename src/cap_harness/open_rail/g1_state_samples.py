@@ -7,6 +7,7 @@ directly from each message, avoiding the SDK's unlocked, position-only buffer.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 import threading
 import time
 from typing import Any
@@ -23,6 +24,7 @@ class G1StateSamples:
         self._arm_names = tuple(arm_names)
         self._lock = threading.Lock()
         self._updated = threading.Condition(self._lock)
+        self._feedback_failure: str | None = None
         self._groups = {
             name: deque(maxlen=capacity)
             for name in ("arm", "head", "waist", "gripper_left", "gripper_right")
@@ -100,6 +102,57 @@ class G1StateSamples:
         """Wait for a newer native-normalized right-gripper DDS sample."""
         return self._wait_next(self._groups["gripper_right"], after_ns, timeout_s)
 
+    def publish_bound_right_feedback(
+        self, *, gripper_timestamp_ns: int, gripper_native: float,
+        arm_feedback: Mapping[str, object] | None,
+    ) -> None:
+        """Copy already-bound feedback from one raw proxy snapshot, without inference."""
+        if isinstance(gripper_timestamp_ns, bool) or not isinstance(gripper_timestamp_ns, int) or gripper_timestamp_ns <= 0:
+            raise ValueError("gripper feedback requires a positive source timestamp")
+        value = float(gripper_native)
+        if not np.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError("gripper feedback must be native-normalized in [0, 1]")
+        grip = (gripper_timestamp_ns, (value,), None)
+        arm = None
+        if arm_feedback is not None:
+            if not isinstance(arm_feedback, Mapping):
+                raise ValueError("right-arm feedback must be a mapping")
+            stamp = arm_feedback.get("timestamp_ns")
+            ids = arm_feedback.get("motor_ids")
+            positions = arm_feedback.get("positions_raw")
+            velocities = arm_feedback.get("velocities_raw")
+            if isinstance(stamp, bool) or not isinstance(stamp, int) or stamp <= 0:
+                raise ValueError("right-arm feedback requires a positive source timestamp")
+            if not isinstance(ids, (list, tuple)) or len(ids) != 7 or any(
+                isinstance(item, bool) or not isinstance(item, int) for item in ids
+            ) or len(set(ids)) != 7:
+                raise ValueError("right-arm feedback requires seven unique motor IDs")
+            positions = np.asarray(positions)
+            velocities = np.asarray(velocities)
+            if positions.shape != (7,) or velocities.shape != (7,) or positions.dtype.kind not in "iuf" or velocities.dtype.kind not in "iuf" or not np.isfinite(positions).all() or not np.isfinite(velocities).all():
+                raise ValueError("right-arm feedback requires seven finite positions and velocities")
+            arm = (stamp, tuple(ids), tuple(float(x) for x in positions), tuple(float(x) for x in velocities))
+        with self._updated:
+            if self._feedback_failure is not None:
+                raise RuntimeError(self._feedback_failure)
+            additions = [(self._groups["gripper_right"], grip)]
+            if arm is not None:
+                additions.append((self._side_groups["right"], arm))
+            for group, sample in additions:
+                if group and (sample[0] < group[-1][0] or (sample[0] == group[-1][0] and sample != group[-1])):
+                    raise ValueError("feedback source timestamp regressed or changed contents")
+            for group, sample in additions:
+                if not group or sample[0] != group[-1][0]:
+                    group.append(sample)
+            self._updated.notify_all()
+
+    def fail_feedback(self, reason: str) -> None:
+        """Wake feedback waiters after the sole broadcaster fails or closes."""
+        with self._updated:
+            if self._feedback_failure is None:
+                self._feedback_failure = str(reason)
+            self._updated.notify_all()
+
     def _wait_next(self, group, after_ns: int, timeout_s: float):
         if isinstance(after_ns, bool) or not isinstance(after_ns, int) or after_ns < 0:
             raise ValueError("after_ns must be a nonnegative integer")
@@ -111,6 +164,8 @@ class G1StateSamples:
         deadline = time.monotonic() + timeout
         with self._updated:
             while True:
+                if self._feedback_failure is not None:
+                    raise RuntimeError(self._feedback_failure)
                 newer = [sample for sample in group if sample[0] > after_ns]
                 if newer:
                     return min(newer, key=lambda sample: sample[0])

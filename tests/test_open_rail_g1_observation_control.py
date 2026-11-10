@@ -1,4 +1,7 @@
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+from queue import Empty, Queue
+import threading
 
 import numpy as np
 import pytest
@@ -7,7 +10,8 @@ from cap_harness.contracts import Pose, TaskContext
 from cap_harness.open_rail import OpenRailAdapter, OpenRailProfile
 from cap_harness.open_rail.g1_camera import G1CameraCalibration, G1DynamicCameraCalibration, G1HeadKinematics, G1RgbdRectification
 from cap_harness.open_rail.g1_observation import G1ObservationControl
-from cap_harness.open_rail.g1_runtime import OpenRailG1ObservationError, OpenRailSnapshot
+from cap_harness.open_rail.g1_broadcast import G1SnapshotBroadcaster
+from cap_harness.open_rail.g1_runtime import OpenRailG1ObservationError, OpenRailG1ObservationRuntime, OpenRailSnapshot
 from cap_harness.open_rail.g1_state import G1StateKinematics
 
 
@@ -134,6 +138,60 @@ def test_read_only_control_passes_explicit_rectification_without_mutating_snapsh
     np.testing.assert_array_equal(observation.cameras["head"].depth_m, np.ones((3, 4)))
     np.testing.assert_array_equal(runtime.snapshot.depth_u16, np.full((3, 4), 1000))
     assert runtime.reads == 1
+
+
+def test_observation_control_accepts_broadcast_without_second_camera_reader(tmp_path, monkeypatch):
+    class Proxy:
+        def __init__(self):
+            self.frames = Queue()
+            self.closed = False
+
+        def retrieve_observation(self):
+            try:
+                return self.frames.get_nowait()
+            except Empty:
+                return None
+
+        def close(self):
+            self.closed = True
+
+    proxy = Proxy()
+    runtime = OpenRailG1ObservationRuntime(
+        open_rail_root=tmp_path, proxy=proxy, bound_state_sampling=True,
+        maximum_rgb_depth_skew_ms=1,
+    )
+    broker = G1SnapshotBroadcaster(runtime, capture_timeout_s=1, close_timeout_s=2)
+    broker.start()
+    adapter = OpenRailAdapter(_control(broker), _profile(), controlled_arms=("right",))
+    waiting = threading.Event()
+    original_wait = broker._condition.wait
+
+    def signal_wait(timeout=None):
+        waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(broker._condition, "wait", signal_wait)
+    sample = _snapshot()
+    payload = {
+        "cam.head": sample.rgb, "cam.head_depth": sample.depth_u16,
+        "obs.state": sample.state, "rgb_timestamp_ns": sample.rgb_timestamp_ns,
+        "rgb_packet_timestamp_ns": sample.rgb_timestamp_ns, "rgb_order": "RGB",
+        "rgb_encoding_format": "UNCOMPRESSED", "rgb_color_format": "RGB", "rgb_decoder": "raw-rgb",
+        "depth_timestamp_ns": sample.depth_timestamp_ns, "depth_encoding": "RS2_FORMAT_Z16",
+        "state_timestamps_ns": sample.state_timestamps_ns, "state_timestamps_bind_state_values": True,
+        "bound_arm_sample": {"names": sample.metadata["arm_joint_names"],
+                             "velocities_raw": sample.arm_velocities_rad_s, "sides": {}},
+    }
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(adapter.reset)
+        assert waiting.wait(1)
+        proxy.frames.put(payload)
+        observation = result.result(timeout=1)
+    np.testing.assert_array_equal(observation.robot_state.joint_positions["right"], np.arange(7, 14))
+    assert observation.cameras["head"].timestamp_s == 1.0
+    assert broker.feedback_samples.wait_next_right_gripper(0, 0)[0] == 1_000_000_000
+    adapter.close()
+    assert proxy.closed
 
 
 @pytest.mark.parametrize("now", [999_000_000, 1_100_000_000])
