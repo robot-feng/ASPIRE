@@ -90,14 +90,16 @@ def _validate_attachment_ack(
         raise ValueError("cuRobo attachment diagnostics did not acknowledge caller-supplied spheres")
 
 
-def _validated_partition_payload(partition, scene, state, attached_object):
+def _validated_partition_payload(partition, scene, state, attached_object, *, preserve_observed_scene=False):
     """Rebuild a pixel partition before binding its exact scene to a request."""
     if partition is None:
+        if preserve_observed_scene:
+            raise ValueError("preserving observed background requires a pixel-partitioned scene")
         return None
     from cap_harness.open_rail.scene_partition import verify_target_scene_partition
     from cap_harness.open_rail.snapshot_identity import snapshot_fingerprint
 
-    if attached_object is None:
+    if attached_object is None and not preserve_observed_scene:
         raise ValueError("pixel-partitioned scene requires an attached object")
     verify_target_scene_partition(partition, scene)
     source_camera = partition.source_observation.cameras[partition.target_camera]
@@ -105,7 +107,7 @@ def _validated_partition_payload(partition, scene, state, attached_object):
         raise ValueError("planning state does not match the pixel-partitioned observation")
     points = np.ascontiguousarray(scene.point_cloud.points, dtype=np.float32)
     return {
-        "mode": "pixel_partition_v1",
+        "mode": "pixel_partition_v2" if preserve_observed_scene else "pixel_partition_v1",
         "snapshot_id": partition.snapshot_id,
         "snapshot_fingerprint": partition.snapshot_fingerprint,
         "scene_fingerprint": partition.scene_fingerprint,
@@ -116,10 +118,19 @@ def _validated_partition_payload(partition, scene, state, attached_object):
 def _validate_partition_ack(response, partition_payload):
     if partition_payload is None:
         return
-    diagnostic = response.get("attachment_diagnostics")
+    preserve = partition_payload["mode"] == "pixel_partition_v2"
+    diagnostic = response.get("scene_partition_diagnostics" if preserve else "attachment_diagnostics")
     if not isinstance(diagnostic, Mapping) or diagnostic.get("scene_partition") != partition_payload:
         raise ValueError("cuRobo did not acknowledge the exact pixel-partitioned scene")
-    if diagnostic.get("robot_scene_carve_may_remove_support_points") is not True:
+    if preserve:
+        if (
+            diagnostic.get("all_background_points_retained") is not True
+            or diagnostic.get("robot_scene_carve_applied") is not False
+            or diagnostic.get("target_interaction_verified") is not False
+            or diagnostic.get("occluded_space_verified") is not False
+        ):
+            raise ValueError("cuRobo did not acknowledge conservative scene preservation")
+    elif diagnostic.get("robot_scene_carve_may_remove_support_points") is not True:
         raise ValueError("cuRobo did not acknowledge the unverified robot carve")
 
 
@@ -318,6 +329,7 @@ class CuRoboProvider:
         maximum_trajectory_dt_s: float | None = None,
         attached_object: AttachedObjectGeometry | None = None,
         target_scene_partition: object | None = None,
+        preserve_observed_scene: bool = False,
     ) -> PlanResult:
         return self._plan(
             robot_state,
@@ -331,6 +343,7 @@ class CuRoboProvider:
             maximum_trajectory_dt_s=maximum_trajectory_dt_s,
             attached_object=attached_object,
             target_scene_partition=target_scene_partition,
+            preserve_observed_scene=preserve_observed_scene,
         )
 
     def plan_to_joints(
@@ -347,6 +360,7 @@ class CuRoboProvider:
         maximum_trajectory_dt_s: float | None = None,
         attached_object: AttachedObjectGeometry | None = None,
         target_scene_partition: object | None = None,
+        preserve_observed_scene: bool = False,
     ) -> PlanResult:
         return self._plan(
             robot_state,
@@ -360,6 +374,7 @@ class CuRoboProvider:
             maximum_trajectory_dt_s=maximum_trajectory_dt_s,
             attached_object=attached_object,
             target_scene_partition=target_scene_partition,
+            preserve_observed_scene=preserve_observed_scene,
         )
 
     def _plan(
@@ -376,7 +391,10 @@ class CuRoboProvider:
         maximum_trajectory_dt_s: float | None,
         attached_object: AttachedObjectGeometry | None,
         target_scene_partition: object | None,
+        preserve_observed_scene: bool,
     ) -> PlanResult:
+        if type(preserve_observed_scene) is not bool:
+            return self._plan_failure("preserve_observed_scene must be a bool")
         error = self._validate_request(robot_state, target, arm)
         if error is not None:
             return PlanResult(ok=False, error=error)
@@ -398,7 +416,8 @@ class CuRoboProvider:
         )
         try:
             partition_payload = _validated_partition_payload(
-                target_scene_partition, scene, robot_state, attached_object
+                target_scene_partition, scene, robot_state, attached_object,
+                preserve_observed_scene=preserve_observed_scene,
             )
         except (TypeError, ValueError) as exc:
             return self._plan_failure("invalid pixel-partitioned scene", {"error": str(exc)})
@@ -480,7 +499,9 @@ class CuRoboProvider:
         diagnostics.update(_attachment_diagnostics(attached_object))
         if partition_payload is not None:
             diagnostics["scene_partition"] = partition_payload
-            diagnostics["robot_scene_carve_may_remove_support_points"] = True
+            diagnostics["robot_scene_carve_may_remove_support_points"] = not preserve_observed_scene
+            diagnostics["target_interaction_verified"] = False
+            diagnostics["occluded_space_verified"] = False
         return PlanResult(
             ok=True,
             trajectory=trajectory,

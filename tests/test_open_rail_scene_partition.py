@@ -252,7 +252,8 @@ def test_tampered_partition_is_refused_before_service():
         _validated_partition_payload(partition, partition.scene, observation.robot_state, None)
 
 
-def test_cap_api_passes_bound_partition_to_curobo_and_keeps_plan_non_executable():
+@pytest.mark.parametrize("preserve,attached", [(False, True), (True, True), (True, False)])
+def test_cap_api_passes_bound_partition_to_curobo_and_keeps_plan_non_executable(preserve, attached):
     observation, localization = _fixture()
     state = observation.robot_state
 
@@ -289,6 +290,7 @@ def test_cap_api_passes_bound_partition_to_curobo_and_keeps_plan_non_executable(
             return Response({
                 "joint_positions_base64": encode_numpy(np.zeros((2, 7))), "dt_s": 0.1,
                 "attachment_diagnostics": service._attachment_diagnostics(request),
+                "scene_partition_diagnostics": service._scene_partition_diagnostics(request),
                 "collision_diagnostics": {"collision_disabled": False, "scene_supplied": True,
                     "world_collision_check_enabled": True, "self_collision_check_enabled": True,
                     "robot_model_verified": True},
@@ -301,12 +303,139 @@ def test_cap_api_passes_bound_partition_to_curobo_and_keeps_plan_non_executable(
     partition = api.partition_target_scene(observation, localization, camera_name="head",
                                            max_camera_state_skew_s=0.02)
     kwargs = dict(arm="right", strategy=MotionStrategy(pose_planner="curobo-integrated"),
-                  planning_scene=partition.scene, robot_state=state, attached_object=_attachment(),
-                  target_scene_partition=partition)
+                  planning_scene=partition.scene, robot_state=state,
+                  attached_object=_attachment() if attached else None,
+                  target_scene_partition=partition, preserve_observed_scene=preserve)
     result = api.plan_motion(Pose([0, 0, 1], [1, 0, 0, 0], "base"), **kwargs)
     assert result.ok and not result.trajectory.collision_aware
     assert result.diagnostics["collision_aware"] is False
     assert session.calls[0]["target_scene_partition"]["scene_fingerprint"] == partition.scene_fingerprint
+    assert session.calls[0]["target_scene_partition"]["mode"] == ("pixel_partition_v2" if preserve else "pixel_partition_v1")
     altered_scene = replace(partition.scene, point_cloud=replace(partition.scene.point_cloud, points=[[9, 9, 9]]))
     rejected = api.plan_motion(Pose([0, 0, 1], [1, 0, 0, 0], "base"), **{**kwargs, "planning_scene": altered_scene})
     assert not rejected.ok and len(session.calls) == 1
+    rejected = api.plan_motion(Pose([0, 0, 1], [1, 0, 0, 0], "base"), **{**kwargs, "target_scene_partition": None, "preserve_observed_scene": True})
+    assert not rejected.ok and len(session.calls) == 1
+
+
+@pytest.mark.parametrize("attached", [False, True])
+def test_preserved_partition_skips_all_geometric_carves(monkeypatch, attached):
+    import sys
+    from types import ModuleType
+
+    observation, localization = _fixture()
+    partition = _partition(observation, localization)
+    attachment = _attachment() if attached else None
+    proof = _validated_partition_payload(
+        partition, partition.scene, observation.robot_state, attachment,
+        preserve_observed_scene=True,
+    )
+    points = partition.scene.point_cloud.points.astype(np.float32)
+    payload = {
+        "base_frame": "base", "model": "agibot_g1", "joint_positions": {"right": [0.0] * 7},
+        "joint_names": {"right": list(observation.robot_state.joint_names["right"])},
+        "base_transforms": {"right": np.eye(4).tolist()}, "end_effector_links": {"right": "tcp"},
+        "scene_points_base64": encode_numpy(points), "target_scene_partition": proof,
+        "attached_object": None if attachment is None else attachment.to_payload(),
+    }
+    request = service.BaseRequest.model_validate(payload)
+    scene_module = ModuleType("curobo.scene")
+    scene_module.Scene = lambda *, mesh: mesh
+    monkeypatch.setitem(sys.modules, "curobo.scene", scene_module)
+    monkeypatch.setattr(service, "_collision_disabled", lambda *_: False)
+    monkeypatch.setattr(service, "_drop_distant_points", lambda *_: pytest.fail("background was filtered"))
+    monkeypatch.setattr(service, "_carve_robot_points", lambda *_: pytest.fail("background was carved"))
+    captured = []
+    monkeypatch.setattr(service, "_voxelized_scene_mesh", lambda received, **_: captured.append(received.copy()))
+    service._scene(request, object())
+    np.testing.assert_array_equal(captured[0], points)
+    diagnostics = service._scene_partition_diagnostics(request)
+    assert diagnostics["scene_partition"] == proof
+    assert diagnostics["robot_scene_carve_applied"] is False
+    assert diagnostics["target_interaction_verified"] is False
+    assert diagnostics["occluded_space_verified"] is False
+
+    too_far = points.copy()
+    too_far[0, 0] = 6.0
+    payload["scene_points_base64"] = encode_numpy(too_far)
+    import hashlib
+    payload["target_scene_partition"] = {**proof, "scene_points_sha256": hashlib.sha256(too_far.tobytes()).hexdigest()}
+    far_request = service.BaseRequest.model_validate(payload)
+    with pytest.raises(service.HTTPException, match="supported range"):
+        service._scene(far_request, object())
+    huge_grid = points.copy()
+    huge_grid[0] = [2.0, 2.0, 2.0]
+    payload["scene_points_base64"] = encode_numpy(huge_grid)
+    payload["voxel_size_m"] = 0.001
+    payload["target_scene_partition"] = {**proof, "scene_points_sha256": hashlib.sha256(huge_grid.tobytes()).hexdigest()}
+    with pytest.raises(service.HTTPException, match="voxel grid"):
+        service._scene(service.BaseRequest.model_validate(payload), object())
+    monkeypatch.setattr(service, "_collision_disabled", lambda *_: True)
+    with pytest.raises(service.HTTPException, match="requires collision checking"):
+        service._scene(request, object())
+
+
+@pytest.mark.parametrize("attached", [False, True])
+@pytest.mark.parametrize("ack", ["matching", "missing", "unsafe"])
+def test_preserved_partition_needs_service_ack_and_stays_preview_only(attached, ack):
+    observation, localization = _fixture()
+    partition = _partition(observation, localization)
+    state = observation.robot_state
+    context = RobotPlanningContext(
+        embodiment=state.embodiment, model="agibot_g1", joint_names=state.joint_names,
+        base_transforms={"right": np.eye(4)}, end_effector_links={"right": "tcp"},
+    )
+
+    class Response:
+        status_code = 200
+        text = ""
+        def __init__(self, payload): self.payload = payload
+        def json(self): return self.payload
+
+    class Session:
+        def request(self, _method, _url, **kwargs):
+            request = service.PlanRequest.model_validate(kwargs["json"])
+            diag = service._scene_partition_diagnostics(request)
+            if ack == "missing":
+                diag = None
+            elif ack == "unsafe":
+                diag["robot_scene_carve_applied"] = True
+            return Response({
+                "joint_positions_base64": encode_numpy(np.zeros((2, 7))), "dt_s": 0.1,
+                "attachment_diagnostics": service._attachment_diagnostics(request),
+                "scene_partition_diagnostics": diag,
+                "collision_diagnostics": {"collision_disabled": False, "scene_supplied": True,
+                    "world_collision_check_enabled": True, "self_collision_check_enabled": True,
+                    "robot_model_verified": True},
+            })
+
+    provider = CuRoboProvider(session=Session())
+    result = provider.plan_to_pose(
+        state, Pose([0, 0, 1], [1, 0, 0, 0], "base"), arm="right",
+        scene=partition.scene, context=context, attached_object=_attachment() if attached else None,
+        target_scene_partition=partition, preserve_observed_scene=True,
+    )
+    if ack == "matching":
+        assert result.ok and not result.trajectory.collision_aware
+        assert result.diagnostics["collision_aware"] is False
+        assert result.diagnostics["robot_scene_carve_may_remove_support_points"] is False
+        assert result.diagnostics["target_interaction_verified"] is False
+        assert result.diagnostics["occluded_space_verified"] is False
+    else:
+        assert not result.ok
+
+
+def test_preserving_scene_requires_explicit_bound_partition():
+    observation, _ = _fixture()
+    state = observation.robot_state
+    context = RobotPlanningContext(
+        embodiment=state.embodiment, model="agibot_g1", joint_names=state.joint_names,
+        base_transforms={"right": np.eye(4)}, end_effector_links={"right": "tcp"},
+    )
+    partition = _partition(*_fixture())
+    result = CuRoboProvider().plan_to_joints(
+        state, np.zeros(7), arm="right", scene=partition.scene, context=context,
+        preserve_observed_scene=True,
+    )
+    assert not result.ok
+    assert "requires a pixel-partitioned scene" in result.error.details["error"]

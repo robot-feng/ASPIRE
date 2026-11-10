@@ -31,6 +31,20 @@ original unique WeVisOne result and matching calibrated `CameraObservation`;
 timestamps and RGB, depth, intrinsics and pose hashes bind the result to that
 observation. The original RGB-D image remains available for scene geometry.
 
+An optional foreground/background depth check helps reject a target mask whose
+valid pixels may all belong to a surface behind the target. Enable it only by
+explicitly setting `background_ring_width_px`, `min_background_valid_pixels`,
+`min_background_valid_fraction`, and `min_foreground_gap_m`. The ring excludes
+the entire original mask, including pixels discarded by depth refinement. It
+compares the refined target's median depth with valid surrounding depth from
+the same camera snapshot. A clipped mask, inadequate surrounding depth, or an
+insufficient gap returns `POINT_CLOUD_FAILED` with `depth_status=uncertain`;
+it does not claim there is no object. The original mask and counts remain in
+the trace. A pass does not prove the target identity, calibration, registration,
+depth correspondence, or safety, and an apple close to the surrounding surface
+may legitimately be inconclusive. No thresholds are inferred or enabled by
+default; choose and validate them for the camera, object and workspace.
+
 Wrap the combined provider in `TracedProvider(..., recorder, "wevisone")` and
 pass the same `RunRecorder` to `CapApi`. Its provider trace serializes the
 original and filtered masks as exact 0/1 uint8 arrays, alongside the thresholds

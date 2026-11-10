@@ -144,7 +144,19 @@ points near robot collision spheres, which can also remove nearby obstacles.
 All plans in this mode are explicitly `collision_aware=False`, even if the
 service reports enabled checks: the service verifies the received bytes, not
 the physical observation, segmentation, unseen space, or robot model. This mode
-is a preview facility and is not yet connected to the public CAP task API.
+is a preview facility. The Open-RAIL CAP API exposes the partition and accepts
+it with an attachment and explicit scene, while retaining the non-executable
+plan status.
+
+For a stricter offline preview, CAP or provider calls may explicitly set
+`preserve_observed_scene=True` with the bound partition, with or without an
+attachment. This mode removes no background points using robot or attachment
+spheres. A scene containing points beyond the service's supported range is
+rejected instead of filtered. The service acknowledges the exact input hash and
+the absence of those carves. Target interaction and occluded space remain
+unverified: every such trajectory remains `collision_aware=False` and cannot
+be executed. Robot points visible in the background may make the start state
+appear in collision.
 
 Before executing generated poses on an AgiBot G1, ASPIRE still needs a
 cuRobo-compatible config based on the installed G1 arm description, a

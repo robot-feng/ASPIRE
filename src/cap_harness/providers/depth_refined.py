@@ -9,10 +9,19 @@ from typing import Any
 import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
+from scipy.ndimage import binary_dilation
 
 from cap_harness.contracts import CameraObservation, Segmentation, SegmentationSet
 from cap_harness.errors import ApiError, ErrorCode
 from cap_harness.protocols import SegmentationProvider
+
+
+class AmbiguousTargetDepth(ValueError):
+    """The mask exists, but its depth cannot distinguish a target from background."""
+
+    def __init__(self, message: str, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 def refine_target_mask(
@@ -25,6 +34,10 @@ def refine_target_mask(
     min_valid_fraction: float,
     min_depth_inlier_fraction: float,
     min_component_fraction: float,
+    background_ring_width_px: int | None = None,
+    min_background_valid_pixels: int | None = None,
+    min_background_valid_fraction: float | None = None,
+    min_foreground_gap_m: float | None = None,
 ) -> tuple[Segmentation, dict[str, Any]]:
     """Return a target mask for this exact RGB-D snapshot and quality counts.
 
@@ -173,7 +186,7 @@ def refine_target_mask(
     refined_mask = np.zeros_like(inliers)
     refined_mask[ys[labels == selected], xs[labels == selected]] = True
     refined = replace(segmentation, mask=refined_mask)
-    return refined, {
+    quality = {
         "snapshot_id": snapshot_id,
         "camera_frame": camera.frame,
         "camera_timestamp_s": camera.timestamp_s,
@@ -196,6 +209,79 @@ def refine_target_mask(
         "min_valid_pixels": min_valid_pixels,
         **fractions,
     }
+    background_options = (
+        background_ring_width_px, min_background_valid_pixels,
+        min_background_valid_fraction, min_foreground_gap_m,
+    )
+    if any(value is not None for value in background_options):
+        if any(value is None for value in background_options):
+            raise ValueError("background depth check requires all four explicit settings")
+        if (
+            isinstance(background_ring_width_px, bool)
+            or not isinstance(background_ring_width_px, int)
+            or not 1 <= background_ring_width_px <= min(segmentation.mask.shape)
+        ):
+            raise ValueError("background_ring_width_px must be a positive integer within the image")
+        if (
+            isinstance(min_background_valid_pixels, bool)
+            or not isinstance(min_background_valid_pixels, int)
+            or min_background_valid_pixels < 1
+        ):
+            raise ValueError("min_background_valid_pixels must be a positive integer")
+        try:
+            min_fraction = float(min_background_valid_fraction)
+            minimum_gap = float(min_foreground_gap_m)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("background depth thresholds must be finite numbers") from exc
+        if (
+            isinstance(min_background_valid_fraction, (bool, np.bool_))
+            or not np.isfinite(min_fraction) or not 0.0 < min_fraction <= 1.0
+            or isinstance(min_foreground_gap_m, (bool, np.bool_))
+            or not np.isfinite(minimum_gap) or minimum_gap <= 0
+        ):
+            raise ValueError("background fraction must be in (0, 1] and foreground gap positive")
+        # The ring excludes the entire source mask: pixels dropped by depth
+        # filtering must not become evidence of an independent background.
+        original = segmentation.mask
+        # The requested ring is truncated even when the mask itself does not
+        # touch the boundary but lies closer to it than the ring width.
+        mask_y, mask_x = np.nonzero(original)
+        height, width = original.shape
+        boundary_clipped = bool(
+            mask_y.min() < background_ring_width_px
+            or mask_x.min() < background_ring_width_px
+            or mask_y.max() + background_ring_width_px >= height
+            or mask_x.max() + background_ring_width_px >= width
+        )
+        ring = binary_dilation(original, structure=np.ones((3, 3), dtype=bool),
+                               iterations=background_ring_width_px) & ~original
+        ring_count = int(np.count_nonzero(ring))
+        ring_valid = ring & np.isfinite(camera.depth_m) & (camera.depth_m > 0)
+        valid_ring_count = int(np.count_nonzero(ring_valid))
+        valid_ring_fraction = valid_ring_count / ring_count if ring_count else 0.0
+        background = {
+            "status": "uncertain", "ring_width_px": background_ring_width_px,
+            "ring_pixels": ring_count, "valid_ring_pixels": valid_ring_count,
+            "valid_ring_fraction": valid_ring_fraction, "frame_clipped": boundary_clipped,
+            "min_background_valid_pixels": min_background_valid_pixels,
+            "min_background_valid_fraction": min_fraction,
+            "min_foreground_gap_m": minimum_gap,
+        }
+        if boundary_clipped:
+            raise AmbiguousTargetDepth("target depth is uncertain: mask touches the image boundary", background)
+        if valid_ring_count < min_background_valid_pixels or valid_ring_fraction < min_fraction:
+            raise AmbiguousTargetDepth("target depth is uncertain: insufficient valid surrounding depth", background)
+        target_median = float(np.median(camera.depth_m[refined_mask]))
+        background_median = float(np.median(camera.depth_m[ring_valid]))
+        gap = background_median - target_median
+        background.update(target_median_depth_m=target_median,
+                          background_median_depth_m=background_median,
+                          foreground_gap_m=gap)
+        if gap < minimum_gap:
+            raise AmbiguousTargetDepth("target depth is uncertain: insufficient foreground/background separation", background)
+        background["status"] = "passed"
+        quality["background_depth_check"] = background
+    return refined, quality
 
 
 class DepthRefinedSegmentationProvider:
@@ -218,6 +304,10 @@ class DepthRefinedSegmentationProvider:
         min_valid_fraction: float,
         min_depth_inlier_fraction: float,
         min_component_fraction: float,
+        background_ring_width_px: int | None = None,
+        min_background_valid_pixels: int | None = None,
+        min_background_valid_fraction: float | None = None,
+        min_foreground_gap_m: float | None = None,
     ) -> None:
         if not callable(getattr(provider, "segment_text", None)):
             raise ValueError("provider must support text segmentation")
@@ -229,6 +319,10 @@ class DepthRefinedSegmentationProvider:
             "min_valid_fraction": min_valid_fraction,
             "min_depth_inlier_fraction": min_depth_inlier_fraction,
             "min_component_fraction": min_component_fraction,
+            "background_ring_width_px": background_ring_width_px,
+            "min_background_valid_pixels": min_background_valid_pixels,
+            "min_background_valid_fraction": min_background_valid_fraction,
+            "min_foreground_gap_m": min_foreground_gap_m,
         }
 
     def segment_text(self, observation: CameraObservation, query: str) -> SegmentationSet:
@@ -248,16 +342,19 @@ class DepthRefinedSegmentationProvider:
         try:
             refined, quality = refine_target_mask(observation, raw, **self.thresholds)
         except ValueError as exc:
+            ambiguity = exc.details if isinstance(exc, AmbiguousTargetDepth) else None
             return SegmentationSet(
                 ok=False,
                 error=ApiError(
-                    ErrorCode.POINT_CLOUD_FAILED, f"target depth filtering failed: {exc}"
+                    ErrorCode.POINT_CLOUD_FAILED, f"target depth filtering failed: {exc}",
+                    details={"depth_status": "uncertain"} if ambiguity is not None else {},
                 ),
                 diagnostics={
                     **raw.diagnostics,
                     "original_masks": raw_masks,
                     "depth_filter_error": str(exc),
                     "depth_filter_options": self.thresholds,
+                    **({"background_depth_check": ambiguity} if ambiguity is not None else {}),
                 },
             )
         refined_mask = refined.mask.astype(np.uint8)
@@ -289,4 +386,4 @@ class DepthRefinedSegmentationProvider:
         )
 
 
-__all__ = ["DepthRefinedSegmentationProvider", "refine_target_mask"]
+__all__ = ["AmbiguousTargetDepth", "DepthRefinedSegmentationProvider", "refine_target_mask"]

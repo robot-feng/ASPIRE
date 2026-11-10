@@ -12,7 +12,7 @@ from cap_harness.errors import ApiError, ErrorCode
 from cap_harness.geometry import mask_to_point_cloud
 from cap_harness.open_rail.verification import HoldVerifier
 from cap_harness.open_rail.hold_replay import HoldReplaySample, replay_hold
-from cap_harness.providers.depth_refined import DepthRefinedSegmentationProvider, refine_target_mask
+from cap_harness.providers.depth_refined import AmbiguousTargetDepth, DepthRefinedSegmentationProvider, refine_target_mask
 from cap_harness.providers.wevisone import WeVisOneProvider
 
 
@@ -143,6 +143,86 @@ def test_touching_objects_separated_by_depth_discontinuity_are_ambiguous() -> No
     result = _segment(camera, np.ones((8, 10), dtype=bool))
     with pytest.raises(ValueError, match="ambiguous disconnected"):
         _refine(camera, result, min_valid_pixels=10)
+
+
+def _background_options():
+    return {
+        "background_ring_width_px": 1,
+        "min_background_valid_pixels": 10,
+        "min_background_valid_fraction": 0.5,
+        "min_foreground_gap_m": 0.05,
+    }
+
+
+def test_background_depth_check_uses_original_mask_and_records_evidence() -> None:
+    camera = _camera()
+    mask = np.zeros((8, 10), dtype=bool)
+    mask[1:7, 1:9] = True
+    segmentation = _segment(camera, mask)
+    refined, details = _refine(camera, segmentation, **_background_options())
+    check = details["background_depth_check"]
+    assert check["status"] == "passed"
+    assert check["ring_pixels"] == 32
+    assert check["valid_ring_pixels"] == 32
+    assert check["target_median_depth_m"] == pytest.approx(0.6)
+    assert check["background_median_depth_m"] == pytest.approx(1.4)
+    assert check["foreground_gap_m"] == pytest.approx(0.8)
+    assert not refined.mask[2, 3] and not refined.mask[3, 3]
+    # Excluded target-mask holes are not incorrectly reused as background.
+    assert check["valid_ring_pixels"] == 32
+
+
+def test_foreground_background_ambiguity_is_not_reported_as_no_target() -> None:
+    camera = replace(_camera(), depth_m=np.full((8, 10), 0.6))
+    mask = np.zeros((8, 10), dtype=bool)
+    mask[1:7, 1:9] = True
+    options = {
+        "max_depth_deviation_m": 0.05, "max_neighbor_depth_step_m": 0.01,
+        "min_valid_pixels": 20, "min_valid_fraction": 0.8,
+        "min_depth_inlier_fraction": 0.8, "min_component_fraction": 0.8,
+        **_background_options(),
+    }
+    provider = DepthRefinedSegmentationProvider(WeVisOneProvider(session=_Session(mask)), **options)
+    result = provider.segment_text(camera, "apple")
+    assert not result.ok
+    assert result.error.code is ErrorCode.POINT_CLOUD_FAILED
+    assert result.error.details["depth_status"] == "uncertain"
+    assert "uncertain" in result.error.message
+    assert result.diagnostics["background_depth_check"]["foreground_gap_m"] == pytest.approx(0)
+    np.testing.assert_array_equal(result.diagnostics["original_masks"][0], mask)
+
+
+def test_background_check_rejects_missing_depth_and_clipped_mask_as_uncertain() -> None:
+    mask = np.zeros((8, 10), dtype=bool)
+    mask[1:7, 1:9] = True
+    camera = _camera()
+    depth = np.array(camera.depth_m)
+    depth[~mask] = 0
+    camera = replace(camera, depth_m=depth)
+    with pytest.raises(AmbiguousTargetDepth, match="insufficient valid surrounding depth"):
+        _refine(camera, _segment(camera, mask), **_background_options())
+
+    clipped = mask.copy()
+    clipped[0, 3] = True
+    camera = replace(_camera(), depth_m=np.full((8, 10), 0.6))
+    with pytest.raises(AmbiguousTargetDepth, match="image boundary"):
+        _refine(camera, _segment(camera, clipped), **_background_options())
+
+    # A wider requested ring can be clipped even when the mask is not.
+    with pytest.raises(AmbiguousTargetDepth, match="image boundary"):
+        _refine(_camera(), _segment(_camera(), mask),
+                **{**_background_options(), "background_ring_width_px": 2})
+
+
+def test_background_depth_check_requires_complete_explicit_configuration() -> None:
+    camera = _camera()
+    mask = np.zeros((8, 10), dtype=bool)
+    mask[1:7, 1:9] = True
+    result = _segment(camera, mask)
+    with pytest.raises(ValueError, match="all four explicit settings"):
+        _refine(camera, result, background_ring_width_px=1)
+    with pytest.raises(ValueError, match="foreground gap positive"):
+        _refine(camera, result, **{**_background_options(), "min_foreground_gap_m": np.bool_(True)})
 
 
 @pytest.mark.parametrize(

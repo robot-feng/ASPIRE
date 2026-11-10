@@ -9,6 +9,7 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 from pathlib import Path
@@ -99,7 +100,7 @@ class AttachedObjectRequest(BaseModel):
 
 
 class TargetScenePartitionRequest(BaseModel):
-    mode: Literal["pixel_partition_v1"]
+    mode: Literal["pixel_partition_v1", "pixel_partition_v2"]
     snapshot_id: str
     snapshot_fingerprint: str
     scene_fingerprint: str
@@ -134,8 +135,10 @@ class BaseRequest(BaseModel):
     def validate_target_scene_partition(self) -> BaseRequest:
         if self.target_scene_partition is None:
             return self
-        if self.attached_object is None or self.scene_points_base64 is None:
-            raise ValueError("target scene partition requires an attached object and scene")
+        if self.scene_points_base64 is None or (
+            self.target_scene_partition.mode == "pixel_partition_v1" and self.attached_object is None
+        ):
+            raise ValueError("target scene partition requires a scene and v1 requires an attached object and scene")
         try:
             points = np.asarray(decode_numpy(self.scene_points_base64))
             if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0 or points.dtype != np.float32:
@@ -168,6 +171,7 @@ class PlanResponse(BaseModel):
     joint_positions_base64: str
     dt_s: float
     attachment_diagnostics: dict[str, Any] | None = None
+    scene_partition_diagnostics: dict[str, Any] | None = None
     collision_diagnostics: dict[str, bool]
 
 
@@ -420,12 +424,25 @@ def _attachment_diagnostics(request: BaseRequest) -> dict[str, Any] | None:
             request.attached_object.contact_link_names
         ),
     }
-    if request.target_scene_partition is not None:
+    if request.target_scene_partition is not None and request.target_scene_partition.mode == "pixel_partition_v1":
         result["scene_partition"] = request.target_scene_partition.model_dump()
         # Robot geometry carving is still active. Even without the attachment
         # carve, a nearby surface may be removed by robot collision spheres.
         result["robot_scene_carve_may_remove_support_points"] = True
     return result
+
+
+def _scene_partition_diagnostics(request: BaseRequest) -> dict[str, Any] | None:
+    partition = request.target_scene_partition
+    if partition is None or partition.mode != "pixel_partition_v2":
+        return None
+    return {
+        "scene_partition": partition.model_dump(),
+        "all_background_points_retained": True,
+        "robot_scene_carve_applied": False,
+        "target_interaction_verified": False,
+        "occluded_space_verified": False,
+    }
 
 
 def _collision_diagnostics(request: BaseRequest) -> dict[str, bool]:
@@ -699,6 +716,7 @@ def _voxelized_scene_mesh(
 
 
 _SCENE_MAX_RANGE_M = 5.0
+_PRESERVED_SCENE_MAX_GRID_CELLS = 25_000_000
 
 
 def _drop_distant_points(
@@ -795,6 +813,8 @@ def _carve_robot_points(request: BaseRequest, robot: Any, points: np.ndarray) ->
 
 def _scene(request: BaseRequest, robot: Any | None = None) -> Any | None:
     if _collision_disabled(request.model):
+        if request.target_scene_partition is not None and request.target_scene_partition.mode == "pixel_partition_v2":
+            raise HTTPException(status_code=400, detail="preserved scene preview requires collision checking")
         _LOGGER.warning(
             "COLLISION DISABLED (CAP_HARNESS_CUROBO_DISABLE_COLLISION is set): the "
             "observed scene is being discarded. Any plan returned is unsafe to execute."
@@ -807,10 +827,23 @@ def _scene(request: BaseRequest, robot: Any | None = None) -> Any | None:
         raise HTTPException(status_code=400, detail="scene points must have shape (N, 3)")
     if not np.all(np.isfinite(points)):
         raise HTTPException(status_code=400, detail="scene points must be finite")
-    points = _drop_distant_points(points)
+    preserve = request.target_scene_partition is not None and request.target_scene_partition.mode == "pixel_partition_v2"
+    if preserve:
+        # Never silently delete a distant observation, while also avoiding the
+        # unbounded dense grid allocation that motivated the legacy filter.
+        if np.any(np.linalg.norm(points, axis=1) > _SCENE_MAX_RANGE_M):
+            raise HTTPException(status_code=422, detail="preserved scene has points outside the supported range")
+        pitch = float(request.voxel_size_m)
+        if not np.isfinite(pitch) or pitch <= 0:
+            raise HTTPException(status_code=400, detail="preserved scene voxel size must be positive and finite")
+        grid_shape = np.ceil(np.ptp(points.astype(np.float64), axis=0) / pitch) + 5
+        if not np.all(np.isfinite(grid_shape)) or math.prod(grid_shape.tolist()) > _PRESERVED_SCENE_MAX_GRID_CELLS:
+            raise HTTPException(status_code=422, detail="preserved scene exceeds the supported voxel grid")
+    else:
+        points = _drop_distant_points(points)
     if len(points) == 0:
         raise HTTPException(status_code=422, detail="scene contains no points in range")
-    if robot is not None:
+    if robot is not None and not preserve:
         try:
             before = len(points)
             points = _carve_robot_points(request, robot, points)
@@ -1437,6 +1470,8 @@ def _check_g1_inactive_arm(
 
 
 def _solve_ik(request: IkRequest) -> dict[str, object]:
+    if request.target_scene_partition is not None:
+        raise HTTPException(status_code=400, detail="scene partitions are not supported for IK")
     _validate(request)
     if request.arm not in request.joint_positions:
         raise HTTPException(status_code=400, detail="unknown arm")
@@ -1500,11 +1535,14 @@ def _plan(request: PlanRequest) -> PlanResponse:
         joint_positions_base64=encode_numpy(positions[:, indices]),
         dt_s=dt,
         attachment_diagnostics=_attachment_diagnostics(request),
+        scene_partition_diagnostics=_scene_partition_diagnostics(request),
         collision_diagnostics=_collision_diagnostics(request),
     )
 
 
 def _plan_synchronized(request: SynchronizedPlanRequest) -> SynchronizedPlanResponse:
+    if request.target_scene_partition is not None:
+        raise HTTPException(status_code=400, detail="scene partitions require single-arm planning")
     arms = _validate(request)
     if request.model == "agibot_g1":
         raise HTTPException(status_code=400, detail="G1 currently permits only single-arm planning")

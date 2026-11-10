@@ -26,6 +26,30 @@ the first AgiBot G1 apple grasp integration.
   depth scale and registration is useful evidence, not independent verification
   of those assumptions. Details are in
   `artifacts/open_rail/rgbd_board_100pct_analysis_20261109/grouped_results.json`.
+- An exploratory full-sheet edge projection on the saved views produced at
+  least four usable gradient comparisons for an edge in 8 of 43 detected
+  frames. Against two manually marked paper corners, the predicted corners
+  differed by roughly 1.4–8.0 px. This is comparable to the measured edge
+  shifts, so the automatic projections cannot establish RGB-D alignment. The
+  assumed PDF/A4 geometry and candidate RGB fit are unverified; the procedure
+  is in `artifacts/open_rail/rgbd_projected_edge_audit_20261110/`.
+- A separate exploratory depth-plane fit highlights a blind-zone risk: in
+  `rgbd_board_100pct_extra50_20261109/sample_0017`, the dominant depth plane
+  inside the projected board region had a 95th-percentile absolute fit residual
+  of approximately 2.4 mm, yet differed from the RGB board plane by approximately
+  76.9 degrees and 79 mm. This is consistent with a different/background plane,
+  not proof of its cause. Both plane estimates assume the unverified RGB
+  calibration, pixel alignment, depth semantics and 0.001 m/count scale; see
+  `artifacts/open_rail/rgbd_plane_consistency_20261110/`. A coherent depth
+  surface within a segmentation mask is not sufficient to prove it belongs to
+  the object.
+- Replaying the previously saved WeVisOne response against its exact historical
+  RGB-D frame gave 6,397 source-mask pixels and 5,983 pixels in one filtered
+  depth component. With exploratory, unverified 0.001 m/count scale and a
+  six-pixel background ring, the median target and ring depths were 0.593 m and
+  0.652 m respectively. This is a historical diagnostic of one view, not a
+  validated threshold, current observation, registration check or grasp plan;
+  files and assumptions are in `artifacts/open_rail/rgbd_foreground_audit_20261110/`.
 - A paper-edge comparison in two first-session images gives candidate square
   widths of 23.93 and 24.08 mm, assuming the full visible sheet is flat,
   untrimmed A4. This is consistent with the print setting, but is not a physical
@@ -102,6 +126,14 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   0.000036 on the left and zero on the right. This does not establish joint-ID
   correspondence, velocity units or behavior during motion. See
   `artifacts/open_rail/bound_state_arm_sides_20261110/`.
+- In that same stationary sample, nearest-value matching maps side motor IDs
+  0–6 to combined-message indices 0–6 on each arm. The smallest difference
+  between the best and second-best match is about 0.00785 on the left and
+  0.15785 on the right. This is a useful candidate correspondence for those
+  two message streams, not a dynamic test or proof that either maps to the
+  physical URDF joints; no motor mapping is enabled on that basis alone.
+  The source hashes and comparison are in
+  `artifacts/open_rail/joint_feedback_match_20261110/`.
 - A later read-only `--broadcast` probe collected three RGB-D frames through
   one Open-RAIL proxy and saved a right-arm seven-ID position/velocity sample
   and right-gripper sample from the parent feedback buffer. These are raw
@@ -159,6 +191,14 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   frame returned one apple mask; the uncorrected frame returned no target.
   Outputs are under `observe_apple_20261104/wevisone_gpu/`. The frame is not
   suitable for control.
+- An offline diagnostic now combines that saved RGB frame, its actual WeVisOne
+  mask and its same-capture raw depth. Of 6,397 mask pixels, 6,089 have raw
+  depth other than the candidate invalid values 0 and 65535. The accompanying
+  camera-frame PLY assumes the later candidate RGB intrinsics, 1 mm/count,
+  RGB-depth registration and RGB axial-Z depth; none is established by this
+  diagnostic. Source hashes, the assumptions, code and output are preserved in
+  `artifacts/open_rail/apple_rgbd_diagnostic_20261110/`. No camera-to-base pose,
+  physical grasp descriptor or executable trajectory is inferred.
 - A subsequent live capture after the adapter's packet-aware RGB fix is under
   `artifacts/open_rail/observe_apple_rgbfixed_20261104/`. It shows the confirmed
   red apple and pink dish, identifies the RGB packet as JPEG/RGB, and matches
@@ -212,6 +252,14 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   not connect to a robot or camera; that is file provenance, not a measurement
   of the installed tool. The official model is simulation evidence and does not
   verify the physical TCP or a collision model for this robot.
+- An offline mesh and linkage audit found that the candidate URDF's finger
+  length and opening directions, expressed in its flange frame, are roughly
+  +Z and +X respectively; the Dream TCP annotation labels approach and jaw
+  directions roughly +X and +Z. This discrepancy prevents using the annotation
+  as a verified GraspGen-X sweep descriptor. A model-only half-open gap of
+  approximately 78.2 mm is not a measurement of the installed gripper. The
+  comparison and assumptions are in
+  `artifacts/open_rail/omnipicker_model_audit_20261110/`.
 - Open-RAIL uses a normalized gripper command with 0=open and 1=closed. The
   mapping from this value to the candidate URDF's gripper joint angle or actual
   opening width has not been established; it cannot yet support swept-volume

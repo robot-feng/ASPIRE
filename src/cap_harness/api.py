@@ -724,6 +724,7 @@ class CapApi:
         robot_state: RobotState | None = None,
         attached_object: object | None = None,
         target_scene_partition: object | None = None,
+        preserve_observed_scene: bool = False,
     ) -> PlanResult:
         """Plan one arm; an attachment requires a supporting collision planner.
 
@@ -738,6 +739,10 @@ class CapApi:
                 ErrorCode.INVALID_REQUEST,
                 "strategy must be a MotionStrategy",
             )
+        if type(preserve_observed_scene) is not bool:
+            return self._plan_failure(ErrorCode.INVALID_REQUEST, "preserve_observed_scene must be a bool")
+        if preserve_observed_scene and target_scene_partition is None:
+            return self._plan_failure(ErrorCode.INVALID_REQUEST, "preserving the scene requires a target partition")
         attachment_options: dict[str, object] = {}
         if attached_object is not None:
             from .providers.curobo.attachment import AttachedObjectGeometry
@@ -772,10 +777,14 @@ class CapApi:
                 "planning_scene must be a PlanningScene or None",
             )
         if target_scene_partition is not None:
-            if not self._embodiment.startswith("open_rail_") or attached_object is None or planning_scene is None:
+            if (
+                not self._embodiment.startswith("open_rail_") or planning_scene is None
+                or target_point_cloud is not None
+                or (attached_object is None and not preserve_observed_scene)
+            ):
                 return self._plan_failure(
                     ErrorCode.INVALID_REQUEST,
-                    "a target-scene partition requires Open-RAIL, an attachment and an explicit scene",
+                    "target-scene partition requires Open-RAIL, an explicit scene and either an attachment or preservation mode",
                 )
             from .open_rail.scene_partition import verify_target_scene_partition
 
@@ -784,6 +793,11 @@ class CapApi:
             except (TypeError, ValueError) as exc:
                 return self._plan_failure(ErrorCode.INVALID_REQUEST, str(exc))
             attachment_options["target_scene_partition"] = target_scene_partition
+            if preserve_observed_scene:
+                attachment_options["preserve_observed_scene"] = True
+            integrated_pose = isinstance(goal, Pose) and strategy.pose_planner != "composed"
+            if not integrated_pose and strategy.trajectory_planner == "interpolation":
+                return self._plan_failure(ErrorCode.UNSUPPORTED, "target-scene partition requires a supporting planner")
         if robot_state is not None and not isinstance(robot_state, RobotState):
             return self._plan_failure(
                 ErrorCode.INVALID_REQUEST,
@@ -844,7 +858,7 @@ class CapApi:
                     ErrorCode.UNSUPPORTED,
                     f"integrated pose planner {strategy.pose_planner!r} is not configured",
                 )
-            if attachment_options and getattr(provider, "supports_attached_objects", False) is not True:
+            if attached_object is not None and getattr(provider, "supports_attached_objects", False) is not True:
                 return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support attachments")
             if target_scene_partition is not None and getattr(provider, "supports_target_scene_partition", False) is not True:
                 return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support target-scene partitions")
@@ -917,7 +931,7 @@ class CapApi:
                     ErrorCode.UNSUPPORTED,
                     f"trajectory planner {strategy.trajectory_planner!r} is not configured",
                 )
-            if attachment_options and getattr(provider, "supports_attached_objects", False) is not True:
+            if attached_object is not None and getattr(provider, "supports_attached_objects", False) is not True:
                 return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support attachments")
             if target_scene_partition is not None and getattr(provider, "supports_target_scene_partition", False) is not True:
                 return self._plan_failure(ErrorCode.UNSUPPORTED, "planner does not support target-scene partitions")

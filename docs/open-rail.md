@@ -69,6 +69,12 @@ still remove nearby obstacles, so the resulting plan is explicitly marked
 non-executable. This is a preview capability and does not establish that
 occluded space is free or that the segmentation and attachment are correct.
 
+The CAP `plan_motion` option `preserve_observed_scene=True` also permits a
+bound partition without an attachment for an approach preview. It retains all
+observed background points and rejects scenes outside planner limits instead
+of silently dropping them. Target contact and occluded space remain unverified,
+so this option also produces only non-executable preview trajectories.
+
 `HoldVerifier` compares a post-close baseline with timestamped observations
 during and after the lift. It requires the object to rise with the tool and
 remain at a consistent tool-relative position for at least three seconds.
