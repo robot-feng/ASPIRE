@@ -43,6 +43,16 @@ def _pose(*, frame: str = "base", quaternion: tuple[float, ...] = (1.0, 0.0, 0.0
     )
 
 
+def test_grasp_width_may_be_unknown_without_changing_numeric_validation() -> None:
+    unknown = GraspCandidate(_pose(), 0.9, None)
+    assert unknown.width_m is None
+    assert GraspCandidate(_pose(), 0.9, 0.04).width_m == 0.04
+    with pytest.raises(ValueError, match="width_m"):
+        GraspCandidate(_pose(), 0.9, -0.04)
+    with pytest.raises(ValueError, match="width_m"):
+        GraspCandidate(_pose(), 0.9, float("nan"))
+
+
 def _robot_state() -> RobotState:
     return RobotState(
         joint_positions=np.zeros(7),

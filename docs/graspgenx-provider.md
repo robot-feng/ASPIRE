@@ -26,8 +26,11 @@ are meters in GraspGenX's gripper-base frame (+Z approach, +X closing). They
 must describe the actual hardware. The provider validates their shape and
 values, but cannot establish their physical provenance. Do not substitute an
 unrelated vendor's `G1` descriptor. The provider uses `extents_open[0]` as the
-candidate opening width, matching the upstream `SweepVolumeParams.jaw_width`
-convention.
+model's sweep-box aperture proxy, matching the upstream
+`SweepVolumeParams.jaw_width` convention. The model does not predict a physical
+opening for each returned candidate: `GraspCandidate.width_m` is `None`. The
+conditioning value is recorded separately in candidate metadata as
+`sweep_box_open_extent_x_m` and must not be used as a measured gripper command.
 
 The frame helpers `gripper_base_pose_to_tcp()` and `tcp_pregrasp_pose()` are
 model-independent. Both require the caller to pass the measured
@@ -36,6 +39,13 @@ distance. GraspGenX's OBB candidate builder points local +Z into the object, so
 the helper retreats along local -Z in gripper-base coordinates, then reapplies
 the base-to-TCP transform. This remains correct when the TCP has a rotational
 offset.
+
+Each candidate's metadata also records `approach_direction_in_frame`, a unit
+vector pointing along the grasp-base +Z approach axis in
+`approach_direction_frame` (the candidate pose's parent frame). It is computed
+before applying the TCP transform, so it is not assumed to equal the TCP's +Z
+axis. A frame conversion must rotate the vector as well as the pose. This
+geometric metadata does not verify the physical TCP or a collision-free path.
 
 GraspGenX does not collision-check returned poses against the rest of the scene.
 The provider marks this in result diagnostics; ASPIRE's planner remains
@@ -70,10 +80,36 @@ the candidates were not checked against a scene or executed.
 
 The installed Genie motion-control bundle contains a G1 description at
 `/home/agi/app/bin/motion-control/share/robot_model/urdf/G1/model.urdf` with
-7-joint left and right arms. ASPIRE's cuRobo service does not load that model;
-it currently accepts `panda`, `dual_panda`, and `yam_real`. `dual_panda` is
+7-joint left and right arms. The cuRobo service accepts an `agibot_g1` model
+only when the absolute path of an external cuRobo V2 YAML is provided in
+`CAP_HARNESS_CUROBO_G1_CONFIG`. The YAML must describe the actual robot,
+including both arms, the inactive arm and the fixed head/torso state, tool
+frames, and conservative collision geometry. Both arm states and their actual
+joint names are required. A plan or IK solution is refused if its inactive arm
+differs from the observed state; synchronized G1 planning is not enabled.
+Loading a YAML does not establish physical correspondence or geometric coverage:
+the service marks G1's model unverified and the client labels its plans
+`collision_aware=False`, preventing the Open-RAIL adapter from executing them.
+This is an offline integration path until evidence-backed model verification,
+including fixed joint state and collision geometry, is implemented. `dual_panda` is
 built from two Franka Panda descriptions, so its other-arm collision checks do
 not describe this G1.
+
+The optional `CAP_HARNESS_CUROBO_G1_JOINT_MAP` points to an absolute JSON file
+whose `joint_name_map` maps every SDK joint name to its model joint name. The
+service checks complete, unique coverage of both arms, binds the map for a
+request, and returns trajectory columns in SDK order. With no map, names must
+match exactly; there is no automatic name substitution. A candidate mapping for
+the locally running `--robot=a2d_v01` profile is in
+`src/cap_harness/configs/open_rail/agibot_g1_a2d_v01_joint_map.candidate.json`.
+Its SDK names and URDF names appear in the local SDK and motion-control
+configuration respectively; their actual correspondence and the model remain
+unverified. The inspected motion-control description is
+`/home/agi/app/bin/motion-control/share/robot_model/urdf/a2d_v01/model.urdf`
+(SHA-256 `8d667a4f7e9b0b87d17314363d9df51a97818fd2957e15884a0a5b1dd1dc8cb8`),
+and its ordered arm joints are listed in
+`/home/agi/app/bin/motion-control/configuration/robot/a2d_v01/model_info/default.yaml`.
+The candidate map is not enabled by default.
 
 The installed Omnipicker control profiles name `left_gripper_link` and
 `right_gripper_link` and give one revolute joint with range `[0, 1]` each, but
@@ -84,11 +120,16 @@ end-frame names.
 Do not use those A2D hand shapes as an Omnipicker model. A head-camera extrinsic
 file exists under `/data/parameters`, but its direction and reference frame
 must be confirmed before using it as a camera-to-planning-frame transform.
+The installed G1 URDF sets the origin of prismatic joint `idx01_body_joint1`
+to z=0.3485 m; the locally found Dream OmniPicker URDF uses z=0.6485 m for the
+same joint, a 0.300 m difference. Their reference frames and lift-zero
+conventions must be verified before combining their robot-base transforms.
 
-cuRobo requests carry an observed scene point cloud but no attached-object
-geometry. The service checks that world scene and the configured robot's own
-collision geometry; `collision_aware=True` does not establish collision
-checking for an apple held in the gripper.
+cuRobo requests can carry caller-supplied attached-object collision spheres.
+These spheres and their contact-link exceptions are acknowledged by the service,
+but their coverage and the scene carve's effect on nearby surfaces remain
+unverified; acknowledgement alone does not establish collision clearance for an
+apple held in the gripper.
 
 Before executing generated poses on an AgiBot G1, ASPIRE still needs a
 cuRobo-compatible config based on the installed G1 arm description, a

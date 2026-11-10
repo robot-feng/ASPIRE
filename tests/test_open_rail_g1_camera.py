@@ -276,6 +276,10 @@ def test_dynamic_camera_requires_verified_fk_clock_and_matching_mount() -> None:
             _dynamic_calibration(),
             head_kinematics=_head_kinematics(),
         )
+    # The fixed-camera path also validates the measured head/waist posture;
+    # timestamps from a later read cannot establish that posture at image time.
+    with pytest.raises(OpenRailG1ObservationError, match="state values bound"):
+        camera_observation_from_snapshot(unbound_state, _calibration())
 
 
 def test_dynamic_camera_rejects_state_timestamp_outside_verified_limit() -> None:

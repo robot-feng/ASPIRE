@@ -94,6 +94,7 @@ def _collision_acknowledged(
     *,
     attached_object: AttachedObjectGeometry | None,
     strict: bool,
+    require_robot_model_ack: bool = False,
 ) -> bool | None:
     """Return enabled status, retaining legacy no-attachment service support.
 
@@ -106,7 +107,7 @@ def _collision_acknowledged(
     if diagnostics is None:
         if required:
             raise ValueError("cuRobo response omitted collision diagnostics")
-        return None
+        return False if require_robot_model_ack else None
     if not isinstance(diagnostics, Mapping):
         raise ValueError("cuRobo collision diagnostics must be a mapping")
 
@@ -130,6 +131,10 @@ def _collision_acknowledged(
         raise ValueError(
             "cuRobo did not acknowledge enabled world and self collision checks with a scene"
         )
+    if require_robot_model_ack and diagnostics.get("robot_model_verified") is not True:
+        if strict:
+            raise ValueError("cuRobo did not verify the G1 robot model")
+        return False
     return enabled
 
 
@@ -189,6 +194,16 @@ class CuRoboProvider:
         *,
         arm: str = "primary",
     ) -> IKResult:
+        if isinstance(robot_state, RobotState) and robot_state.embodiment.startswith("open_rail_"):
+            return IKResult(
+                ok=False,
+                arm=arm,
+                embodiment=robot_state.embodiment,
+                error=ApiError(
+                    code=ErrorCode.UNSUPPORTED,
+                    message="Open-RAIL IK requires an explicit robot planning context",
+                ),
+            )
         return self.solve_ik_with_context(
             target_pose,
             robot_state,
@@ -213,6 +228,9 @@ class CuRoboProvider:
                 error=error,
                 embodiment=robot_state.embodiment,
             )
+        error = self._validate_open_rail_context(robot_state, context)
+        if error is not None:
+            return IKResult(ok=False, arm=arm, error=error, embodiment=robot_state.embodiment)
         payload = self._base_payload(robot_state, context)
         payload.update(
             {"arm": arm, "target": self._encode_target(target_pose, robot_state.embodiment)}
@@ -245,7 +263,10 @@ class CuRoboProvider:
             joint_positions=joints,
             arm=arm,
             embodiment=robot_state.embodiment,
-            diagnostics={"provider": "curobo", "collision_aware": True},
+            diagnostics={
+                "provider": "curobo",
+                "collision_aware": not robot_state.embodiment.startswith("open_rail_"),
+            },
         )
 
     def plan_to_pose(
@@ -329,6 +350,9 @@ class CuRoboProvider:
             )
         if scene is None or context is None:
             return self._plan_failure("cuRobo planning requires a scene and robot context")
+        error = self._validate_open_rail_context(robot_state, context)
+        if error is not None:
+            return PlanResult(ok=False, error=error)
         payload = self._base_payload(
             robot_state, context, scene, attached_object=attached_object
         )
@@ -350,6 +374,7 @@ class CuRoboProvider:
                 response,
                 attached_object=attached_object,
                 strict=self.strict_collision_ack,
+                require_robot_model_ack=context.model == "agibot_g1",
             )
             raw = decode_numpy(response.get("joint_positions_base64"))
             source_dt = float(response.get("dt_s"))
@@ -429,6 +454,9 @@ class CuRoboProvider:
             )
         if scene is None or context is None:
             return self._sync_failure("cuRobo planning requires a scene and robot context")
+        error = self._validate_open_rail_context(robot_state, context)
+        if error is not None:
+            return SynchronizedPlanResult(ok=False, error=error)
         if set(targets) != set(robot_state.arms):
             return self._sync_failure(
                 "targets must name every robot arm", code=ErrorCode.INVALID_REQUEST
@@ -465,6 +493,7 @@ class CuRoboProvider:
                 response,
                 attached_object=attached_object,
                 strict=self.strict_collision_ack,
+                require_robot_model_ack=context.model == "agibot_g1",
             )
             source_dt = float(response.get("dt_s"))
             encoded = response.get("joint_positions_base64")
@@ -617,6 +646,33 @@ class CuRoboProvider:
         if not np.isfinite(numeric) or numeric <= 0.0:
             raise ValueError(f"{name} must be positive and finite")
         return numeric
+
+    @staticmethod
+    def _validate_open_rail_context(
+        state: RobotState, context: RobotPlanningContext
+    ) -> ApiError | None:
+        """Keep G1 state values tied to the configured robot and joint order."""
+        if not state.embodiment.startswith("open_rail_"):
+            return None
+        if not isinstance(context, RobotPlanningContext):
+            return ApiError(code=ErrorCode.INVALID_REQUEST, message="robot planning context is invalid")
+        if context.embodiment != state.embodiment or set(context.arms) != set(state.arms):
+            return ApiError(
+                code=ErrorCode.INVALID_REQUEST,
+                message="Open-RAIL planning context embodiment and arms must match robot state",
+            )
+        for arm in state.arms:
+            if tuple(context.joint_names[arm]) != tuple(state.joint_names[arm]):
+                return ApiError(
+                    code=ErrorCode.INVALID_REQUEST,
+                    message=f"Open-RAIL joint order does not match robot state for {arm!r}",
+                )
+        if context.model in {"panda", "dual_panda", "yam_real"}:
+            return ApiError(
+                code=ErrorCode.UNSUPPORTED,
+                message="Open-RAIL requires its own robot model, not a Panda or YAM model",
+            )
+        return None
 
     @staticmethod
     def _validate_request(

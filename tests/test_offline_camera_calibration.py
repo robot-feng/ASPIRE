@@ -114,6 +114,9 @@ def test_saved_synthetic_views_calibrate_selected_model(tmp_path, model):
     saved_samples = json.loads((output / "samples.json").read_text())
     assert len(saved_samples["accepted"]) == result["accepted_view_count"]
     assert all((output / sample["saved_image"]).is_file() for sample in saved_samples["accepted"])
+    for frame, sample in zip(intrinsics["per_frame"], saved_samples["accepted"], strict=True):
+        assert frame["source_image"] == sample["image"]
+        assert frame["saved_image"] == sample["saved_image"]
 
 
 def test_one_view_is_not_accepted_as_an_intrinsic_calibration(tmp_path):

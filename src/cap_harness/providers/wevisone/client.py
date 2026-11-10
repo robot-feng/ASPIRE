@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from collections.abc import Mapping
+import hashlib
 import struct
 import zlib
 
@@ -214,6 +215,20 @@ class WeVisOneProvider:
             diagnostics={
                 "provider": "wevisone",
                 "query": query,
+                "camera_frame": observation.frame,
+                "camera_timestamp_s": observation.timestamp_s,
+                "rgb_sha256": hashlib.sha256(observation.rgb.tobytes()).hexdigest(),
+                "depth_sha256": hashlib.sha256(observation.depth_m.tobytes()).hexdigest(),
+                "intrinsics_sha256": hashlib.sha256(observation.intrinsics.tobytes()).hexdigest(),
+                "camera_pose_sha256": hashlib.sha256(
+                    observation.camera_pose.as_matrix().tobytes()
+                ).hexdigest(),
+                "camera_parent_frame": observation.camera_pose.frame,
+                "snapshot_id": (
+                    None
+                    if observation.timestamp_s is None
+                    else f"{observation.frame}@{observation.timestamp_s:.9f}"
+                ),
                 "mask_threshold": self.mask_threshold,
                 "score_semantics": "neutral; provider emits no confidence score",
                 "total_instances": total_instances,

@@ -269,7 +269,7 @@ class GraspGenXProvider:
         order = np.argsort(-scores, kind="stable")
         if max_candidates is not None:
             order = order[:max_candidates]
-        width_m = float(self.sweep_volume_params["extents_open"][0])  # type: ignore[index]
+        sweep_extent_x_m = float(self.sweep_volume_params["extents_open"][0])  # type: ignore[index]
         candidates: list[GraspCandidate] = []
         for index in order:
             transform = transforms[index]
@@ -282,12 +282,17 @@ class GraspGenXProvider:
                 GraspCandidate(
                     pose=pose,
                     score=float(scores[index]),
-                    width_m=width_m,
+                    width_m=None,
                     metadata={
                         "provider": "graspgenx",
                         "grasp_frame": grasp_frame,
                         "graspgenx_pose_frame": "gripper_base",
                         "tcp_transform_applied": gripper_base_to_tcp is not None,
+                        "approach_direction_in_frame": transform[:3, 2].tolist(),
+                        "approach_direction_frame": frame,
+                        "approach_direction_semantics": "graspgenx_base_positive_z_toward_object",
+                        "sweep_box_open_extent_x_m": sweep_extent_x_m,
+                        "opening_width_semantics": "not_predicted",
                         "branch": str(branches[index]) if branches else "unspecified",
                     },
                 )

@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 
 from fastapi import FastAPI, HTTPException
 import numpy as np
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, PrivateAttr, model_validator
 import uvicorn
 
 from cap_harness.contracts import JOINT_DIMENSIONS
@@ -99,7 +99,7 @@ class AttachedObjectRequest(BaseModel):
 
 class BaseRequest(BaseModel):
     base_frame: str
-    model: Literal["panda", "dual_panda", "yam_real"]
+    model: Literal["panda", "dual_panda", "yam_real", "agibot_g1"]
     joint_positions: dict[str, list[float]]
     joint_names: dict[str, list[str]]
     base_transforms: dict[str, list[list[float]]]
@@ -109,6 +109,7 @@ class BaseRequest(BaseModel):
     interpolation_dt_s: float | None = None
     maximum_trajectory_dt_s: float | None = None
     attached_object: AttachedObjectRequest | None = None
+    _g1_joint_map: dict[str, str] | None = PrivateAttr(default=None)
 
 
 class IkRequest(BaseRequest):
@@ -307,6 +308,19 @@ def _robot_config(request: BaseRequest) -> str:
         robot_config = os.environ.get("CAP_HARNESS_CUROBO_PANDA_CONFIG", "franka.yml")
     elif request.model == "yam_real":
         robot_config = _yam_real_robot_config()
+    elif request.model == "agibot_g1":
+        configured = os.environ.get("CAP_HARNESS_CUROBO_G1_CONFIG")
+        if not configured:
+            raise HTTPException(status_code=503, detail="G1 cuRobo robot config is not configured")
+        path = Path(configured)
+        if not path.is_absolute() or not path.is_file():
+            raise HTTPException(
+                status_code=503,
+                detail="G1 cuRobo robot config must be an existing absolute path",
+            )
+        if _collision_disabled(request.model):
+            raise HTTPException(status_code=400, detail="G1 planning requires collision checking")
+        robot_config = str(path.resolve())
     else:
         value = os.environ.get("CAP_HARNESS_CUROBO_DUAL_CONFIG")
         if value and Path(value).is_file():
@@ -381,12 +395,18 @@ def _collision_diagnostics(request: BaseRequest) -> dict[str, bool]:
     """
     disabled = _collision_disabled(request.model)
     scene_supplied = request.scene_points_base64 is not None
-    return {
+    result = {
         "collision_disabled": disabled,
         "scene_supplied": scene_supplied,
         "world_collision_check_enabled": not disabled and scene_supplied,
         "self_collision_check_enabled": not disabled,
     }
+    if request.model == "agibot_g1":
+        # Loading a YAML cannot establish that its collision geometry, lock
+        # joints or tool frame correspond to the physical robot. Expose offline
+        # plans without presenting them as verified execution trajectories.
+        result["robot_model_verified"] = False
+    return result
 
 
 def _attached_robot_config(
@@ -882,6 +902,14 @@ def _validate(request: BaseRequest) -> tuple[str, ...]:
         raise HTTPException(status_code=400, detail="joint mappings must share non-empty arms")
     if set(request.end_effector_links) != set(arms) or set(request.base_transforms) != set(arms):
         raise HTTPException(status_code=400, detail="robot context arm mappings do not match")
+    if request.model == "agibot_g1":
+        if len(arms) != 2:
+            raise HTTPException(
+                status_code=400, detail="G1 planning requires both observed arm states"
+            )
+        names = [name for arm in arms for name in request.joint_names[arm]]
+        if len(set(names)) != len(names):
+            raise HTTPException(status_code=400, detail="G1 joint names must be unique across arms")
     for arm in arms:
         joints = np.asarray(request.joint_positions[arm], dtype=np.float64)
         transform = np.asarray(request.base_transforms[arm], dtype=np.float64)
@@ -957,16 +985,49 @@ def _clip_joint_positions(positions: np.ndarray, planner: Any) -> np.ndarray:
     return clipped
 
 
-def _state(request: BaseRequest, planner: Any) -> Any:
-    from curobo.types import JointState
-    import torch
+def _model_joint_names(request: BaseRequest, arm: str) -> list[str]:
+    """Map G1 SDK names only through an explicitly configured one-to-one map."""
+    names = request.joint_names[arm]
+    if request.model != "agibot_g1":
+        return list(names)
+    if request._g1_joint_map is None:
+        request_names = [name for key in request.joint_names for name in request.joint_names[key]]
+        path_value = os.environ.get("CAP_HARNESS_CUROBO_G1_JOINT_MAP")
+        if path_value is None:
+            mapping = {name: name for name in request_names}
+        else:
+            path = Path(path_value)
+            if not path.is_absolute() or not path.is_file():
+                raise HTTPException(
+                    status_code=503, detail="G1 joint map must be an existing absolute path"
+                )
+            try:
+                content = json.loads(path.read_text(encoding="utf-8"))
+                mapping = content["joint_name_map"]
+            except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise HTTPException(status_code=503, detail=f"invalid G1 joint map: {exc}") from exc
+            if not isinstance(mapping, dict):
+                raise HTTPException(status_code=503, detail="G1 joint_name_map must be an object")
+        if (
+            set(mapping) != set(request_names)
+            or any(
+                not isinstance(v, str) or not v.strip() or v != v.strip()
+                for v in mapping.values()
+            )
+            or len(set(mapping.values())) != len(request_names)
+        ):
+            raise HTTPException(status_code=400, detail="G1 joint map must uniquely cover both arm states")
+        request._g1_joint_map = dict(mapping)
+    return [request._g1_joint_map[name] for name in names]
 
+
+def _joint_positions_in_model_order(request: BaseRequest, expected: list[str]) -> np.ndarray:
+    """Match observed joint values to a model without guessing G1 name mappings."""
     ordered_arms = tuple(request.joint_positions)
     positions = np.concatenate([request.joint_positions[arm] for arm in ordered_arms])
-    names = [name for arm in ordered_arms for name in request.joint_names[arm]]
-    expected = list(planner.joint_names)
+    names = [name for arm in ordered_arms for name in _model_joint_names(request, arm)]
     if set(names) != set(expected):
-        if len(ordered_arms) == 1 and len(expected) == 7:
+        if request.model != "agibot_g1" and len(ordered_arms) == 1 and len(expected) == 7:
             names = expected
         else:
             raise HTTPException(
@@ -974,7 +1035,19 @@ def _state(request: BaseRequest, planner: Any) -> Any:
                 detail=f"request joint names do not match cuRobo model: {names} != {expected}",
             )
     reorder = [names.index(name) for name in expected]
-    positions = _clip_joint_positions(positions[reorder], planner)
+    return positions[reorder]
+
+
+def _state(request: BaseRequest, planner: Any) -> Any:
+    from curobo.types import JointState
+    import torch
+
+    expected = list(planner.joint_names)
+    positions = _joint_positions_in_model_order(request, expected)
+    clipped = _clip_joint_positions(positions, planner)
+    if request.model == "agibot_g1" and not np.allclose(positions, clipped, rtol=0, atol=1e-7):
+        raise HTTPException(status_code=400, detail="G1 observed joints require model-limit clipping")
+    positions = clipped
     return JointState.from_position(
         torch.as_tensor(positions, device="cuda", dtype=torch.float32).reshape(1, -1),
         joint_names=expected,
@@ -986,7 +1059,7 @@ def _requested_indices(
     arm: str,
     available_names: list[str],
 ) -> list[int]:
-    requested = request.joint_names[arm]
+    requested = _model_joint_names(request, arm)
     if set(requested) <= set(available_names):
         return [available_names.index(name) for name in requested]
     canonical_panda = [f"panda_joint{index}" for index in range(1, 8)]
@@ -1121,8 +1194,12 @@ def _ordered_goal_poses(
     current: Any,
 ) -> tuple[dict[str, Any], list[str]]:
     """Complete partial bimanual pose goals with the inactive live tool pose."""
-    poses = {request.end_effector_links[arm]: _pose(target) for arm, target in targets.items()}
     ordered = _goal_tool_frames(request, planner)
+    if request.model == "agibot_g1":
+        tools = list(request.end_effector_links.values())
+        if len(set(tools)) != len(tools) or not set(tools).issubset(ordered):
+            raise HTTPException(status_code=400, detail="G1 tool frames do not match robot model")
+    poses = {request.end_effector_links[arm]: _pose(target) for arm, target in targets.items()}
     missing = [name for name in ordered if name not in poses]
     if missing:
         current_poses = planner.compute_kinematics(current).tool_poses.to_dict()
@@ -1288,10 +1365,36 @@ def _trajectory(
     return positions, dt, names
 
 
+def _check_g1_inactive_arm(
+    request: IkRequest | PlanRequest, names: list[str], positions: np.ndarray
+) -> None:
+    """Ensure every uncommanded arm stays at its observed joint positions."""
+    if request.model != "agibot_g1":
+        return
+    values = np.asarray(positions, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != len(names) or not np.all(np.isfinite(values)):
+        raise HTTPException(status_code=500, detail="G1 planner returned malformed joint positions")
+    if len(set(names)) != len(names):
+        raise HTTPException(status_code=500, detail="G1 planner returned duplicate joint names")
+    for arm in request.joint_positions:
+        if arm == request.arm:
+            continue
+        model_joint_names = _model_joint_names(request, arm)
+        missing = set(model_joint_names) - set(names)
+        if missing:
+            raise HTTPException(status_code=500, detail="G1 planner omitted inactive-arm joints")
+        indices = [names.index(name) for name in model_joint_names]
+        observed = np.asarray(request.joint_positions[arm], dtype=np.float64)
+        if not np.allclose(values[:, indices], observed[None, :], rtol=0, atol=1e-6):
+            raise HTTPException(status_code=422, detail="G1 plan would move the inactive arm")
+
+
 def _solve_ik(request: IkRequest) -> dict[str, object]:
     _validate(request)
     if request.arm not in request.joint_positions:
         raise HTTPException(status_code=400, detail="unknown arm")
+    if request.model == "agibot_g1" and request.target.frame != request.base_frame:
+        raise HTTPException(status_code=400, detail="G1 target frame must match the robot base")
     solver = _ik_solver(request)
     current = _state(request, solver)
     # A single-arm goal on a model that declares two tool frames is refused by
@@ -1306,6 +1409,7 @@ def _solve_ik(request: IkRequest) -> dict[str, object]:
         raise HTTPException(status_code=422, detail="cuRobo IK target is unreachable")
     solution = np.asarray(result.js_solution.position.detach().cpu()).reshape(-1)
     solution_names = list(result.js_solution.joint_names)
+    _check_g1_inactive_arm(request, solution_names, solution.reshape(1, -1))
     joints = solution[_requested_indices(request, request.arm, solution_names)]
     return {"joint_positions": joints.tolist()}
 
@@ -1314,6 +1418,12 @@ def _plan(request: PlanRequest) -> PlanResponse:
     _validate(request)
     if request.arm not in request.joint_positions:
         raise HTTPException(status_code=400, detail="unknown arm")
+    if (
+        request.model == "agibot_g1"
+        and request.target.type == "pose"
+        and request.target.frame != request.base_frame
+    ):
+        raise HTTPException(status_code=400, detail="G1 target frame must match the robot base")
     planner = _planner(request)
     current = _state(request, planner)
     goal_state: Any | None = None
@@ -1337,6 +1447,7 @@ def _plan(request: PlanRequest) -> PlanResponse:
     positions, dt, names = _trajectory(
         result, planner=planner, current=current, goal_state=goal_state
     )
+    _check_g1_inactive_arm(request, names, positions)
     indices = _requested_indices(request, request.arm, names)
     return PlanResponse(
         joint_positions_base64=encode_numpy(positions[:, indices]),
@@ -1348,6 +1459,8 @@ def _plan(request: PlanRequest) -> PlanResponse:
 
 def _plan_synchronized(request: SynchronizedPlanRequest) -> SynchronizedPlanResponse:
     arms = _validate(request)
+    if request.model == "agibot_g1":
+        raise HTTPException(status_code=400, detail="G1 currently permits only single-arm planning")
     if set(request.targets) != set(arms):
         raise HTTPException(status_code=400, detail="targets must name every arm")
     planner = _planner(request)

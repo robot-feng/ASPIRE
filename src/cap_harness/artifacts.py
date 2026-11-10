@@ -269,16 +269,26 @@ class _Span:
         recorder: RunRecorder,
         *,
         capture_segmentation: bool,
+        wevisone_camera: CameraObservation | None = None,
     ) -> None:
         self.path, self.serializer, self.state = path, serializer, state
         self.recorder = recorder
         self.capture_segmentation = capture_segmentation
+        self.wevisone_camera = wevisone_camera
 
     def output(self, value: object, *, ok: bool = True) -> object:
         with self.recorder.timing.measure("trace_write"):
             self.serializer.dump(self.path / "output.json", value)
         if self.capture_segmentation and isinstance(value, SegmentationSet):
             self.recorder.segmentation_overlay(value)
+        elif (
+            self.wevisone_camera is not None
+            and isinstance(value, SegmentationSet)
+            and value.diagnostics.get("provider") == "wevisone"
+        ):
+            self.recorder.segmentation_overlay(
+                value, camera=self.wevisone_camera, provider="wevisone"
+            )
         self.state["ok"] = ok
         return value
 
@@ -443,6 +453,18 @@ class RunRecorder:
             self.serializer.dump(directory / "input.json", inputs)
         self._event("span_start", span_id=span_id, parent_id=parent, name=name, category=category)
         token, state, started = _PARENT.set(span_id), {"ok": True}, time.monotonic()
+        wevisone_camera = None
+        if category == "provider" and isinstance(inputs, Mapping):
+            args = inputs.get("args", ())
+            kwargs = inputs.get("kwargs", {})
+            if isinstance(args, (tuple, list)) and args:
+                candidate = args[0]
+            elif isinstance(kwargs, Mapping):
+                candidate = kwargs.get("observation")
+            else:
+                candidate = None
+            if isinstance(candidate, CameraObservation):
+                wevisone_camera = candidate
         try:
             yield _Span(
                 directory,
@@ -450,6 +472,7 @@ class RunRecorder:
                 state,
                 self,
                 capture_segmentation=category == "provider" and name.startswith("sam3."),
+                wevisone_camera=wevisone_camera,
             )
         except BaseException as exc:
             self.serializer.dump(
@@ -548,30 +571,65 @@ class RunRecorder:
             {"label": label, "step_index": self.step_count, "cameras": cameras},
         )
 
-    def segmentation_overlay(self, result: SegmentationSet) -> None:
-        """Save one annotated image containing every returned SAM candidate.
+    def segmentation_overlay(
+        self,
+        result: SegmentationSet,
+        *,
+        camera: CameraObservation | None = None,
+        provider: str = "sam3",
+    ) -> None:
+        """Save an annotated image containing returned segmentation candidates.
 
-        One image per provider call keeps large campaigns tractable while still
-        showing false positives, score ordering, boxes, and overlapping masks.
-        Raw masks remain summarized rather than persisted.
+        One image per provider call shows boxes and overlapping masks. For
+        WeVisOne, preserve the exact input RGB-D and returned masks as evidence;
+        the legacy SAM overlay retains its existing compact recording behavior.
         """
-        if not result.ok or not result.segmentations or self.last_observation is None:
+        if not result.ok or not result.segmentations:
+            return
+        if provider == "wevisone":
+            if camera is None or not self._wevisone_matches_camera(result, camera):
+                return
+        elif self.last_observation is None:
             return
         with self.timing.measure("overlay"):
-            self._segmentation_overlay(result)
+            self._segmentation_overlay(result, camera=camera, provider=provider)
 
-    def _segmentation_overlay(self, result: SegmentationSet) -> None:
-        segmentations = result.segmentations[:5]
-        first = segmentations[0]
-        camera = next(
-            (
-                item
-                for name, item in self.last_observation.cameras.items()
-                if name == first.camera_name or item.frame == first.frame
+    @staticmethod
+    def _wevisone_matches_camera(result: SegmentationSet, camera: CameraObservation) -> bool:
+        """Never pair a returned mask with another observation, even at the same timestamp."""
+        info = result.diagnostics
+        expected = {
+            "provider": "wevisone",
+            "camera_frame": camera.frame,
+            "camera_timestamp_s": camera.timestamp_s,
+            "rgb_sha256": hashlib.sha256(camera.rgb.tobytes()).hexdigest(),
+            "depth_sha256": hashlib.sha256(camera.depth_m.tobytes()).hexdigest(),
+            "intrinsics_sha256": hashlib.sha256(camera.intrinsics.tobytes()).hexdigest(),
+            "camera_pose_sha256": hashlib.sha256(camera.camera_pose.as_matrix().tobytes()).hexdigest(),
+            "camera_parent_frame": camera.camera_pose.frame,
+            "snapshot_id": (
+                None if camera.timestamp_s is None else f"{camera.frame}@{camera.timestamp_s:.9f}"
             ),
-            None,
-        )
+        }
+        return camera.timestamp_s is not None and all(info.get(k) == v for k, v in expected.items())
+
+    def _segmentation_overlay(
+        self, result: SegmentationSet, *, camera: CameraObservation | None, provider: str
+    ) -> None:
+        segmentations = result.segmentations if provider == "wevisone" else result.segmentations[:5]
+        first = segmentations[0]
+        if camera is None and self.last_observation is not None:
+            camera = next(
+                (
+                    item
+                    for name, item in self.last_observation.cameras.items()
+                    if name == first.camera_name or item.frame == first.frame
+                ),
+                None,
+            )
         if camera is None or camera.rgb.shape[:2] != first.mask.shape:
+            return
+        if provider == "wevisone" and first.frame != camera.frame:
             return
         rgb = np.asarray(camera.rgb)
         if np.issubdtype(rgb.dtype, np.floating):
@@ -594,7 +652,7 @@ class RunRecorder:
                 or segmentation.frame != first.frame
             ):
                 continue
-            color = colors[index]
+            color = colors[index % len(colors)]
             overlay[mask] = np.rint(0.68 * overlay[mask] + 0.32 * color).astype(np.uint8)
             box = None
             if segmentation.box_xyxy is not None:
@@ -611,19 +669,26 @@ class RunRecorder:
                     "score": float(segmentation.score),
                     "box_xyxy": box,
                     "mask_pixels": int(np.count_nonzero(mask)),
+                    **(
+                        {"mask": self.serializer.encode(mask.astype(np.uint8), self.root / "payloads")}
+                        if provider == "wevisone"
+                        else {}
+                    ),
                 }
             )
         self.overlay_index += 1
         directory = self.root / "media/overlays"
         directory.mkdir(parents=True, exist_ok=True)
-        stem = f"sam3-{self.overlay_index:06d}-{_component(first.camera_name)}"
+        stem = f"{_component(provider)}-{self.overlay_index:06d}-{_component(first.camera_name)}"
         from PIL import Image, ImageDraw
 
         image = Image.fromarray(overlay)
         draw = ImageDraw.Draw(image)
         for box, color, index, segmentation in boxes:
             draw.rectangle(box, outline=color, width=3)
-            text = f"#{index + 1} {segmentation.label} {segmentation.score:.3f}"
+            text = f"#{index + 1} {segmentation.label}"
+            if provider != "wevisone":
+                text += f" {segmentation.score:.3f}"
             text_y = max(0, box[1] - 13)
             draw.rectangle(
                 (box[0], text_y, min(image.width - 1, box[0] + 8 * len(text)), text_y + 12),
@@ -640,6 +705,24 @@ class RunRecorder:
                 "camera_frame": first.frame,
                 "image_shape": list(first.mask.shape),
                 "candidates": records,
+                **(
+                    {
+                        "provider": "wevisone",
+                        "snapshot_id": result.diagnostics["snapshot_id"],
+                        "rgb_sha256": result.diagnostics["rgb_sha256"],
+                        "depth_sha256": result.diagnostics["depth_sha256"],
+                        "score_semantics": result.diagnostics.get("score_semantics"),
+                        "camera": {
+                            "rgb": self.serializer.encode(camera.rgb, self.root / "payloads"),
+                            "depth_m": self.serializer.encode(camera.depth_m, self.root / "payloads"),
+                            "intrinsics": self.serializer.encode(camera.intrinsics, self.root / "payloads"),
+                            "pose": self.serializer.encode(camera.camera_pose, self.root / "payloads"),
+                            "timestamp_s": camera.timestamp_s,
+                        },
+                    }
+                    if provider == "wevisone"
+                    else {}
+                ),
             },
         )
 

@@ -80,7 +80,9 @@ def test_provider_maps_ranked_gripper_base_poses_in_cloud_frame() -> None:
     assert grasp.frame == "head_optical"
     assert np.allclose(grasp.pose.position, [0.2, 0.0, 0.0])
     assert np.isclose(grasp.score, 0.9)
-    assert np.isclose(grasp.width_m, 0.09)
+    assert grasp.width_m is None
+    assert np.isclose(grasp.metadata["sweep_box_open_extent_x_m"], 0.09)
+    assert grasp.metadata["opening_width_semantics"] == "not_predicted"
     assert grasp.metadata["grasp_frame"] == "gripper_base"
     assert grasp.metadata["tcp_transform_applied"] is False
     assert grasp.metadata["branch"] == "obb"
@@ -164,6 +166,34 @@ def test_frame_helpers_back_out_along_graspgenx_approach_axis() -> None:
         grasp_tcp.as_matrix()[:3, :3],
     )
     assert pregrasp_tcp.frame == grasp_tcp.frame == "robot_base"
+
+
+def test_provider_preserves_base_approach_direction_with_rotated_tcp() -> None:
+    grasp_base = np.eye(4)
+    grasp_base[:3, :3] = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]]
+    grasp_base[:3, 3] = [0.2, 0.3, 0.4]
+    base_to_tcp = np.eye(4)
+    base_to_tcp[:3, :3] = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]
+    base_to_tcp[:3, 3] = [0.0, 0.0, 0.12]
+    session = _Session(_response(grasp_base[None], np.array([0.8]), ["diff"]))
+    provider = GraspGenXProvider(
+        SWEEP_VOLUME, session=session, gripper_base_to_tcp=base_to_tcp  # type: ignore[arg-type]
+    )
+
+    result = provider.generate_grasps(_cloud("robot_base"))
+
+    assert result.ok
+    candidate = result.grasps[0]
+    direction = np.asarray(candidate.metadata["approach_direction_in_frame"])
+    assert np.allclose(direction, [1.0, 0.0, 0.0])
+    assert candidate.metadata["approach_direction_frame"] == candidate.frame
+    assert candidate.metadata["approach_direction_semantics"] == (
+        "graspgenx_base_positive_z_toward_object"
+    )
+    # The TCP's +Z is not the GraspGen-X approach direction here.
+    assert not np.allclose(candidate.pose.as_matrix()[:3, 2], direction)
+    expected = tcp_pregrasp_pose(candidate.pose, base_to_tcp, distance_m=0.1)
+    assert np.allclose(candidate.pose.position - 0.1 * direction, expected.position)
 
 
 def test_provider_rejects_mismatched_scene_frame_without_inference() -> None:

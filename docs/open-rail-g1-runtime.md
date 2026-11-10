@@ -8,6 +8,15 @@ dedicated `/wbc/right_ee_command` endpoint with Open-RAIL's normalized
 `0=open, 1=closed` value. `g1_body.py` rejects Open-RAIL's generic action,
 manual-control, and robot-reset entry points so those cannot bypass the scope.
 
+ASPIRE's shared gripper contract uses `1=open, 0=closed`. A G1 control facade
+must therefore convert ASPIRE commands at the G1 boundary. The command runtime
+provides `set_cap_gripper()` for this explicit conversion; its existing
+`set_gripper()` remains in the native Open-RAIL domain. The available normalized
+feedback convention has not been verified physically and must not be converted
+to an ASPIRE `RobotState` until its direction and normalization are established.
+Action and trajectory gripper columns need the same conversion in the future
+G1 facade, which does not yet exist; neither path is currently implemented.
+
 These mappings are not currently executable. The SDK methods only publish
 commands. `RobotProxy`'s RPC return means the body method returned, not that the
 robot reached its target. `MotionControlStatus` reports mode, error, frames,

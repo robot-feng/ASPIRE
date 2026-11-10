@@ -22,6 +22,34 @@ _SESSION_STATE_ATTRIBUTE = "_cap_harness_g1_motion_session_state"
 _SESSION_CREATION_LOCK = threading.Lock()
 
 
+def _normalized_gripper(value: object) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError("gripper position must be finite and in [0, 1]")
+    try:
+        position = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("gripper position must be finite and in [0, 1]") from exc
+    if not math.isfinite(position) or not 0.0 <= position <= 1.0:
+        raise ValueError("gripper position must be finite and in [0, 1]")
+    return position
+
+
+def cap_gripper_to_g1(position: float) -> float:
+    """Map ASPIRE opening (1=open) to Open-RAIL's G1 command (0=open)."""
+    return 1.0 - _normalized_gripper(position)
+
+
+def g1_feedback_to_cap(position: float, *, convention_verified: bool = False) -> float:
+    """Map a verified normalized G1 feedback value to ASPIRE's opening domain.
+
+    This mapping is valid only after the physical feedback convention and
+    normalization are verified. Raw snapshots remain in the Open-RAIL domain.
+    """
+    if convention_verified is not True:
+        raise ValueError("G1 gripper feedback convention must be verified")
+    return 1.0 - _normalized_gripper(position)
+
+
 class G1MotionSessionState:
     """Shared command uncertainty latch for every facade over one G1 proxy."""
 
@@ -396,6 +424,25 @@ class OpenRailG1CommandRuntime:
         with self._session_state.command_lock:
             return self._set_gripper_locked(arm, position, timeout_s=timeout_s)
 
+    def set_cap_gripper(
+        self,
+        position: float,
+        *,
+        arm: str = G1_RIGHT_ARM,
+        timeout_s: float,
+    ) -> ExecutionResult:
+        """Translate an ASPIRE opening target before the native G1 command.
+
+        ``set_gripper`` stays in Open-RAIL's native command domain. This explicit
+        entry point is intended for a future ``OpenRailControl`` implementation;
+        it does not itself implement observations, steps, or trajectories.
+        """
+        try:
+            native_position = cap_gripper_to_g1(position)
+        except ValueError as exc:
+            return self._failure(ErrorCode.INVALID_REQUEST, str(exc))
+        return self.set_gripper(arm, native_position, timeout_s=timeout_s)
+
     def _set_gripper_locked(
         self, arm: str, position: float, *, timeout_s: float
     ) -> ExecutionResult:
@@ -591,5 +638,7 @@ __all__ = [
     "G1CommandTransport",
     "OpenRailG1CommandRuntime",
     "OpenRailG1ProxyCommandTransport",
+    "cap_gripper_to_g1",
+    "g1_feedback_to_cap",
     "proxy_motion_session_state",
 ]

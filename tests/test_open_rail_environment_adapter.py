@@ -175,6 +175,57 @@ def test_enabled_control_resolves_aliases_and_validates_gripper_range() -> None:
     assert not invalid.ok
 
 
+def test_cap_open_close_reach_native_g1_endpoint_through_explicit_bridge() -> None:
+    from cap_harness.api import CapApi
+    from cap_harness.open_rail.g1_control import (
+        G1CommandCapabilities,
+        OpenRailG1CommandRuntime,
+    )
+
+    # Test doubles only: this does not establish any physical gripper convention.
+    class Transport:
+        def __init__(self):
+            self.targets = []
+
+        def publish_right_gripper(self, position):
+            self.targets.append(position)
+
+    class Feedback:
+        def __init__(self):
+            self.targets = []
+
+        def wait_for_right_gripper(self, target, **kwargs):
+            self.targets.append(target)
+            return True
+
+    profile = _profile()
+    transport, feedback = Transport(), Feedback()
+    runtime = OpenRailG1CommandRuntime(
+        transport,
+        feedback=feedback,
+        capabilities=G1CommandCapabilities(
+            gripper_terminal_feedback_verified=True,
+            gripper_stop_or_hold_verified=True,
+        ),
+        allow_physical_motion=True,
+        gripper_tolerance=0.03,
+    )
+
+    class Control(_Control):
+        def set_gripper(self, position: float, *, arm: str):
+            return runtime.set_cap_gripper(position, arm=arm, timeout_s=0.5)
+
+    adapter = OpenRailAdapter(Control(profile), profile, allow_physical_motion=True,
+                              controlled_arms=("right",))
+    api = CapApi(adapter)
+
+    assert api.open_gripper().ok
+    assert api.close_gripper().ok
+    assert api.set_gripper(0.25).ok
+    assert transport.targets == [0.0, 1.0, 0.75]
+    assert feedback.targets == transport.targets
+
+
 def test_unchecked_trajectory_is_rejected_before_transport() -> None:
     profile = _profile()
     control = _Control(profile)

@@ -28,3 +28,45 @@ independent verification.
 The pattern was generated with OpenCV's ChArUco implementation. See the
 [OpenCV calibration pattern documentation](https://docs.opencv.org/4.x/da/d0d/tutorial_camera_calibration_pattern.html)
 and [ENPIRE's calibration-board guide](https://github.com/NVlabs/ENPIRE/blob/main/enpire/env/docs/CALIBRATION_BOARD.md).
+
+## Offline RGB-D board diagnostics
+
+The saved RGB-D samples from `examples/open_rail/observe.py --samples` can be
+checked without opening a camera. Supply the RGB intrinsic fit, nominal or
+physically measured square length, a **candidate** depth scale, and explicit
+candidate invalid values:
+
+```sh
+python -m cap_harness.open_rail.rgbd_calibration_check \
+  --samples /path/to/rgbd-samples --intrinsics /path/to/rgb/calibration.json \
+  --output /path/to/new-report.json --square-mm 24 \
+  --candidate-scale-m 0.001 --invalid-depth-values 0 65535
+```
+
+The report retains hashes, detected ChArUco corners, per-frame reprojection
+error, raw RGB/depth times, board-plane distance and depth comparisons. These
+are descriptive: print size, axial-Z depth semantics, and RGB/depth pixel
+registration are assumptions, not verified facts. It never writes parameters
+back to the robot. A physical length reference remains necessary for metric
+scale.
+
+Optionally provide `--paper-annotations annotations.json` to examine the
+visible paper boundary and selected local RGB/depth discontinuities. The JSON
+maps a sample directory name to four ordered, adjacent paper corners in RGB
+pixels and their assumed corresponding paper edge lengths in millimetres:
+
+```json
+{
+  "sample_0001": {
+    "corners_px": [[180, 200], [460, 200], [460, 600], [180, 600]],
+    "edge_lengths_mm": [297, 210, 297, 210]
+  }
+}
+```
+
+The corners and edge lengths above illustrate the format only and must be
+replaced with measurements from the actual view. Paper corners must refer to the
+visible edge of the same flat, untrimmed sheet and lie inside the image. The
+local edge test samples only matching contrast transitions near those manually
+marked edges, with exploratory thresholds; it cannot prove full-image
+registration or replace inspection of the original images.

@@ -17,6 +17,7 @@ from cap_harness.contracts import (
     PlanResult,
     PointCloud,
     Pose,
+    RobotPlanningContext,
     RobotState,
     Segmentation,
     SegmentationSet,
@@ -74,6 +75,18 @@ class _Adapter:
 
     def get_robot_state(self) -> RobotState:
         return self.observation.robot_state
+
+
+class _PlanningAdapter(_Adapter):
+    def get_planning_context(self) -> RobotPlanningContext:
+        state = self.observation.robot_state
+        return RobotPlanningContext(
+            embodiment=state.embodiment,
+            model="agibot_g1",
+            joint_names=state.joint_names,
+            base_transforms={arm: np.eye(4) for arm in state.arms},
+            end_effector_links={arm: "fake_tool" for arm in state.arms},
+        )
 
 
 class _SegmentationProvider:
@@ -198,6 +211,36 @@ def test_perception_and_grasp_reuse_the_supplied_observation() -> None:
     assert grasps.diagnostics["camera_timestamp_s"] == 12.0
     assert grasps.diagnostics["observation_timestamp_s"] == 12.0
     assert grasps.diagnostics["snapshot_id"] == localized.diagnostics["snapshot_id"]
+
+
+def test_grasp_rejects_changed_rgbd_or_state_even_with_the_same_timestamps() -> None:
+    observation = _observation()
+    grasping = _GraspProvider()
+    api = CapApi(
+        _Adapter(observation),  # type: ignore[arg-type]
+        segmentation_provider=_SegmentationProvider(),
+        grasp_providers={"graspgenx": grasping},
+        default_camera="head",
+    )
+    api.estimate_geometry = lambda cloud: ObjectGeometry(  # type: ignore[method-assign]
+        pose=_pose(cloud.points.mean(axis=0), frame=cloud.frame),
+        extents=np.full(3, 0.1),
+        point_count=len(cloud.points),
+    )
+    localized = api.localize_object_from_observation("apple", observation)
+    assert localized.ok
+    altered_camera = replace(observation.cameras["head"], depth_m=np.full((2, 2), 1.1))
+    altered_state = replace(observation.robot_state, joint_positions=np.full(7, 0.01))
+    for changed in (
+        replace(observation, cameras={"head": altered_camera}),
+        replace(observation, robot_state=altered_state),
+    ):
+        result = api.generate_grasps_for_localization(
+            localized, changed, camera_name="head", max_camera_state_skew_s=0.05
+        )
+        assert not result.ok
+        assert result.error.details["reason"] == "snapshot_mismatch"
+    assert grasping.point_cloud is None
 
 
 def test_grasp_generation_rejects_localization_from_an_older_snapshot() -> None:
@@ -369,7 +412,7 @@ def test_localization_rejects_sparse_depth_in_the_target_mask() -> None:
 
 def test_explicit_planning_scene_is_reused_without_another_camera_read() -> None:
     observation = _observation()
-    adapter = _Adapter(observation)
+    adapter = _PlanningAdapter(observation)
     planner = _PosePlanner()
     api = CapApi(
         adapter,  # type: ignore[arg-type]
@@ -395,6 +438,57 @@ def test_explicit_planning_scene_is_reused_without_another_camera_read() -> None
     assert planner.robot_state.timestamp_s == observation.robot_state.timestamp_s
     assert not np.any(np.all(np.isclose(planner.scene.point_cloud.points, target.points[0]), axis=1))
     assert len(planner.scene.point_cloud.points) < len(scene.point_cloud.points)
+
+
+def test_open_rail_planning_rejects_missing_or_mismatched_context() -> None:
+    observation = _observation()
+
+    class WrongJointOrder(_PlanningAdapter):
+        def get_planning_context(self) -> RobotPlanningContext:
+            context = super().get_planning_context()
+            return replace(
+                context,
+                joint_names={arm: tuple(reversed(names)) for arm, names in context.joint_names.items()},
+            )
+
+    for adapter in (_Adapter(observation), WrongJointOrder(observation)):
+        planner = _PosePlanner()
+        api = CapApi(
+            adapter,  # type: ignore[arg-type]
+            integrated_pose_planning_providers={"curobo-integrated": planner},
+            default_camera="head",
+        )
+        scene = api.get_planning_scene(observation=observation)
+        result = api.plan_motion(
+            _pose(),
+            strategy=MotionStrategy(pose_planner="curobo-integrated"),
+            planning_scene=scene,
+            robot_state=observation.robot_state,
+        )
+        assert not result.ok
+        assert result.error is not None
+        assert "planning context" in result.error.message
+        assert planner.robot_state is None
+
+
+def test_open_rail_ik_rejects_provider_without_context_or_missing_context() -> None:
+    class NoContextProvider:
+        def solve_ik(self, *_args, **_kwargs):
+            raise AssertionError("a provider without context must not be called")
+
+    class ContextProvider:
+        def solve_ik_with_context(self, *_args, **_kwargs):
+            raise AssertionError("a provider without robot context must not be called")
+
+    for provider in (NoContextProvider(), ContextProvider()):
+        api = CapApi(
+            _Adapter(_observation()),  # type: ignore[arg-type]
+            ik_providers={"pyroki": provider},
+        )
+        result = api.solve_ik(_pose())
+        assert not result.ok
+        assert result.error is not None
+        assert "context" in result.error.message
 
 
 def test_explicit_planning_scene_must_match_robot_base_frame() -> None:
@@ -435,7 +529,7 @@ def test_program_passes_attachment_to_capable_pose_planner() -> None:
     observation = _observation()
     planner = Planner()
     api = CapApi(
-        _Adapter(observation),  # type: ignore[arg-type]
+        _PlanningAdapter(observation),  # type: ignore[arg-type]
         integrated_pose_planning_providers={"curobo-integrated": planner},
         default_camera="head",
     )
@@ -480,7 +574,7 @@ def test_joint_planner_receives_the_attached_object() -> None:
 
     planner = Planner()
     api = CapApi(
-        _Adapter(_observation()),  # type: ignore[arg-type]
+        _PlanningAdapter(_observation()),  # type: ignore[arg-type]
         trajectory_planning_providers={"curobo": planner},
         default_camera="head",
     )

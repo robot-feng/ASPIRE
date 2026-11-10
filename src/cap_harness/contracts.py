@@ -1070,11 +1070,15 @@ class ObjectGeometry:
 
 @dataclass(frozen=True, slots=True)
 class GraspCandidate:
-    """A scored gripper pose and opening width in metres."""
+    """A scored gripper pose and optional predicted opening width in metres.
+
+    ``width_m=None`` means that the provider did not predict an opening. It is
+    not an instruction to open or close the physical gripper.
+    """
 
     pose: Pose
     score: float
-    width_m: float
+    width_m: float | None
     approach_distance_m: float = 0.0
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -1087,11 +1091,12 @@ class GraspCandidate:
             "score",
             _finite_float(self.score, "score", minimum=0.0, maximum=1.0),
         )
-        object.__setattr__(
-            self,
-            "width_m",
-            _finite_float(self.width_m, "width_m", minimum=0.0),
-        )
+        if self.width_m is not None:
+            object.__setattr__(
+                self,
+                "width_m",
+                _finite_float(self.width_m, "width_m", minimum=0.0),
+            )
         object.__setattr__(
             self,
             "approach_distance_m",

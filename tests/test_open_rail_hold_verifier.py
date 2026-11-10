@@ -13,6 +13,7 @@ from cap_harness.contracts import (
     RobotState,
 )
 from cap_harness.open_rail.verification import HoldVerifier
+from cap_harness.open_rail.snapshot_identity import snapshot_fingerprint
 
 
 def _pose(x: float, z: float) -> Pose:
@@ -51,6 +52,7 @@ def _sample(timestamp: float, object_x: float, object_z: float, tool_z: float):
             "camera_name": "head",
             "segmentation_source": "provider",
             "instance_count": 1,
+            "snapshot_fingerprint": snapshot_fingerprint(camera, state),
         },
     )
     return observation, localization
@@ -89,6 +91,18 @@ def test_stationary_or_slipping_object_does_not_count_as_held() -> None:
 
     assert stationary.status == "not_lifted"
     assert slipping.status == "not_following"
+
+
+def test_hold_rejects_changed_camera_content_with_unchanged_timestamp() -> None:
+    verifier = _verifier()
+    observation, localization = _sample(2.0, 0.0, 0.15, 0.20)
+    camera = replace(observation.cameras["head"], depth_m=np.full((2, 2), 1.2))
+    changed = replace(observation, cameras={"head": camera})
+
+    evidence = verifier.observe(changed, localization)
+
+    assert evidence.status == "unknown"
+    assert "content" in evidence.reason
 
 
 def test_occlusion_and_gaps_reset_hold_window() -> None:
@@ -176,7 +190,16 @@ def test_relative_position_uses_the_rotating_tool_frame() -> None:
 
     evidence = verifier.observe(
         replace(observation, robot_state=rotated_state),
-        replace(localized, geometry=rotated_object),
+        replace(
+            localized,
+            geometry=rotated_object,
+            diagnostics={
+                **localized.diagnostics,
+                "snapshot_fingerprint": snapshot_fingerprint(
+                    observation.cameras["head"], rotated_state
+                ),
+            },
+        ),
     )
 
     assert evidence.status == "pending"

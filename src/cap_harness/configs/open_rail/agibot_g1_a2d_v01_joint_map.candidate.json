@@ -1,0 +1,20 @@
+{
+  "schema": "cap-harness/g1-joint-map-candidate/1",
+  "description": "Order-based SDK to a2d_v01 URDF mapping; physical correspondence requires verification.",
+  "joint_name_map": {
+    "Joint1_l": "idx05_left_arm_joint1",
+    "Joint2_l": "idx06_left_arm_joint2",
+    "Joint3_l": "idx07_left_arm_joint3",
+    "Joint4_l": "idx08_left_arm_joint4",
+    "Joint5_l": "idx09_left_arm_joint5",
+    "Joint6_l": "idx10_left_arm_joint6",
+    "Joint7_l": "idx11_left_arm_joint7",
+    "Joint1_r": "idx12_right_arm_joint1",
+    "Joint2_r": "idx13_right_arm_joint2",
+    "Joint3_r": "idx14_right_arm_joint3",
+    "Joint4_r": "idx15_right_arm_joint4",
+    "Joint5_r": "idx16_right_arm_joint5",
+    "Joint6_r": "idx17_right_arm_joint6",
+    "Joint7_r": "idx18_right_arm_joint7"
+  }
+}

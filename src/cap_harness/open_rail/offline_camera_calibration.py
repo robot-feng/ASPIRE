@@ -368,6 +368,10 @@ def calibrate_directory(
     for index, view in enumerate(views):
         saved_name = f"sample-{index:03d}{view['path'].suffix.lower()}"
         shutil.copyfile(view["path"], samples_dir / saved_name)
+        # Samples from separate capture directories often share the same file
+        # name (head_rgb.png); retain the exact source for each residual.
+        result["per_frame"][index]["source_image"] = str(view["path"])
+        result["per_frame"][index]["saved_image"] = f"samples/{saved_name}"
         accepted_samples.append(
             {
                 "image": str(view["path"]),

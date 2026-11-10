@@ -8,6 +8,7 @@ from typing import Literal
 import numpy as np
 
 from cap_harness.contracts import LocalizationResult, Observation, Pose
+from cap_harness.open_rail.snapshot_identity import snapshot_fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +166,8 @@ class HoldVerifier:
             raise ValueError("localization does not belong to this camera snapshot")
         if localization.diagnostics.get("robot_state_timestamp_s") != state.timestamp_s:
             raise ValueError("localization does not belong to this robot state")
+        if localization.diagnostics.get("snapshot_fingerprint") != snapshot_fingerprint(camera, state):
+            raise ValueError("localization does not match this camera and robot state content")
         tool = state.end_effector_poses.get(self.arm)
         if tool is None or tool.frame != state.base_frame:
             raise ValueError("tool pose is unavailable in the robot base frame")

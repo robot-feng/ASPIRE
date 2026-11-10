@@ -29,6 +29,11 @@ class OpenRailControl(Protocol):
     Commands are limited to the configured arm joints and grippers; torso, waist,
     head, and base controls are outside this interface. Every command must return
     only after its terminal feedback is available.
+
+    Gripper values in every shared contract use ASPIRE opening semantics:
+    1.0 is open and 0.0 is closed. A robot-specific implementation must convert
+    its own native commands and independently verified feedback, including
+    action and trajectory gripper fields, at its transport boundary.
     """
 
     def get_observation(self) -> Observation: ...

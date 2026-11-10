@@ -68,3 +68,9 @@ python -m examples.open_rail.observe \
 
 `--require-depth` skips initial RGB-only frames until the timeout. It does not
 certify RGB-depth registration, metric scale, or synchronization.
+
+For a stationary-camera calibration sequence, add `--samples 24 --interval 2.5`.
+One read-only runtime saves each raw RGB-D/state snapshot and its timestamps in
+a separate `sample_XXXX` directory. The operator moves the flat board between
+views while the robot remains still. No depth units or frame alignment are
+inferred by the capture command.

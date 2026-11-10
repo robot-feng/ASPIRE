@@ -118,7 +118,7 @@ def test_runtime_preserves_raw_z16_and_only_claims_configured_timestamp_skew(
     np.testing.assert_array_equal(snapshot.depth_u16, raw_depth)
     np.testing.assert_array_equal(snapshot.state, np.arange(20, dtype=np.float32))
     assert snapshot.depth_skew_ns == 100_000
-    assert snapshot.is_synchronized
+    assert not snapshot.is_synchronized
     assert snapshot.metadata["public_camera_key"] == "head"
     assert snapshot.metadata["calibration"]["depth_scale_m_per_unit"] is None
     assert snapshot.metadata["state_timestamps_bind_state_values"] is False
@@ -137,6 +137,19 @@ def test_runtime_only_preserves_explicit_state_timestamp_binding_claim(tmp_path)
 
     assert unbound.metadata["state_timestamps_bind_state_values"] is False
     assert bound.metadata["state_timestamps_bind_state_values"] is True
+    assert not unbound.is_synchronized
+    adapter.close()
+
+
+def test_synchronization_requires_bound_state_and_matching_timestamps(tmp_path) -> None:
+    adapter = OpenRailG1ObservationRuntime(
+        open_rail_root=tmp_path, maximum_rgb_depth_skew_ms=1.0, proxy=_Proxy()
+    )
+    observation = _observation(depth=np.ones((3, 5), dtype=np.uint16))
+    observation["state_timestamps_bind_state_values"] = True
+    assert adapter._decode(observation).is_synchronized
+    observation["state_timestamps_ns"]["arm"] = 990_000_000
+    assert not adapter._decode(observation).is_synchronized
     adapter.close()
 
 

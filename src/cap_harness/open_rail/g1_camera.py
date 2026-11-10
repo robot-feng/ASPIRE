@@ -318,11 +318,9 @@ def camera_observation_from_snapshot(
 
     if snapshot.metadata.get("robot_type") != "agibot_g1":
         raise OpenRailG1ObservationError("camera conversion requires an AgiBot G1 snapshot")
-    if isinstance(calibration, G1DynamicCameraCalibration) and (
-        snapshot.metadata.get("state_timestamps_bind_state_values") is not True
-    ):
+    if snapshot.metadata.get("state_timestamps_bind_state_values") is not True:
         raise OpenRailG1ObservationError(
-            "dynamic camera conversion requires state values bound to their reported DDS timestamps"
+            "camera conversion requires state values bound to their reported DDS timestamps"
         )
     if snapshot.metadata.get("rgb_order") != "RGB":
         raise OpenRailG1ObservationError("snapshot RGB channel order is not verified as RGB")

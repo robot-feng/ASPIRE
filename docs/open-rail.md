@@ -33,9 +33,30 @@ Configure `controlled_arms=("right",)` for the initial G1 task. Both arm states
 remain available to the planner; commands for the other arm are rejected before
 they reach the Open-RAIL runtime.
 
+`examples/open_rail/pick_apple.py` is a CAP program for the first planning
+stage. Given an Open-RAIL CAP registry and explicit `open_rail_pick_apple` task
+metadata, it reuses one observation for single-apple localization, GraspGen-X
+and full-scene pregrasp planning. It returns a preview only when the returned
+trajectory is marked collision-aware, and always reports the full grasp task as
+incomplete. It sends no gripper or arm commands.
+
+`cap_harness.open_rail.runner.run_apple_preview` composes that program with
+WeVisOne, depth-mask refinement, GraspGen-X, cuRobo and the normal CAP runner
+and recorder. It takes a caller-owned `OpenRailAdapter`, recorder, explicit
+depth-filter thresholds, gripper sweep geometry, gripper-base-to-TCP transform
+and control period. Service URLs can be supplied independently. The adapter
+must be read-only and scoped to the right arm; the caller closes it and
+finalizes the recorder. No model service or policy process is started by this
+function. The inputs are not proof of physical calibration. The current code
+does not yet construct a calibrated G1 control facade; contact, lift, holding
+verification and a complete execution launcher remain to be integrated.
+
 `HoldVerifier` compares a post-close baseline with timestamped observations
 during and after the lift. It requires the object to rise with the tool and
 remain at a consistent tool-relative position for at least three seconds.
+Open-RAIL localization also carries a content fingerprint of the RGB-D image,
+camera calibration and robot state; grasp generation and hold verification reject
+a different observation even if it reuses the same timestamps.
 The caller must establish that the initial object was on the table, validate
 observation freshness, and supply thresholds and the vertical direction from
 the calibrated robot setup. Missing detections, timestamp mismatches, or gaps

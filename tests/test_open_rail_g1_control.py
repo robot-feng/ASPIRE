@@ -11,6 +11,8 @@ from cap_harness.open_rail.g1_control import (
     G1CommandCapabilities,
     OpenRailG1CommandRuntime,
     OpenRailG1ProxyCommandTransport,
+    cap_gripper_to_g1,
+    g1_feedback_to_cap,
     proxy_motion_session_state,
 )
 
@@ -194,6 +196,36 @@ def test_single_gripper_endpoint_preserves_normalized_command() -> None:
     assert feedback.gripper_calls[0][0] == 0.4
     with pytest.raises(ValueError, match="only permits the configured right gripper"):
         runtime.map_gripper_target("left", 0.4)
+
+
+@pytest.mark.parametrize("cap_position,native_position", [(1.0, 0.0), (0.0, 1.0), (0.25, 0.75)])
+def test_cap_gripper_boundary_converts_once_and_waits_in_native_domain(
+    cap_position, native_position
+) -> None:
+    transport, feedback = _Transport(), _Feedback()
+    runtime = _runtime(transport, feedback)
+
+    result = runtime.set_cap_gripper(cap_position, arm="right", timeout_s=0.5)
+
+    assert result.ok
+    assert transport.calls == [("gripper", native_position)]
+    assert feedback.gripper_calls[0][0] == native_position
+    assert g1_feedback_to_cap(native_position, convention_verified=True) == cap_position
+
+
+@pytest.mark.parametrize("value", [True, np.bool_(False), float("nan"), -0.1, 1.1, "bad"])
+def test_cap_gripper_invalid_targets_are_never_published(value) -> None:
+    transport = _Transport()
+    runtime = _runtime(transport, _Feedback())
+
+    assert not runtime.set_cap_gripper(value, timeout_s=0.5).ok
+    assert transport.calls == []
+
+
+def test_gripper_feedback_conversion_requires_explicitly_verified_convention() -> None:
+    with pytest.raises(ValueError, match="feedback convention must be verified"):
+        g1_feedback_to_cap(0.0)
+    assert cap_gripper_to_g1(1.0) == 0.0
 
 
 def test_capability_evidence_must_be_boolean() -> None:

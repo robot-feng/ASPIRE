@@ -498,6 +498,13 @@ class CapApi:
             )
         camera = observation.cameras[name]
         expected_id = self._snapshot_id(camera.frame, camera.timestamp_s)
+        fingerprint_mismatch = False
+        if observation.robot_state.embodiment.startswith("open_rail_"):
+            from .open_rail.snapshot_identity import snapshot_fingerprint
+
+            fingerprint_mismatch = localization.diagnostics.get(
+                "snapshot_fingerprint"
+            ) != snapshot_fingerprint(camera, observation.robot_state)
         if (
             expected_id is None
             or localization.diagnostics.get("snapshot_id") != expected_id
@@ -507,6 +514,7 @@ class CapApi:
             or localization.diagnostics.get("robot_state_timestamp_s")
             != observation.robot_state.timestamp_s
             or localization.point_cloud.frame != observation.robot_state.base_frame
+            or fingerprint_mismatch
         ):
             return GraspSet(
                 ok=False,
@@ -634,11 +642,30 @@ class CapApi:
                 )
         solve_with_context = getattr(provider, "solve_ik_with_context", None)
         if callable(solve_with_context):
+            try:
+                context = self._planning_context(state)
+            except (TypeError, ValueError) as exc:
+                return IKResult(
+                    ok=False,
+                    arm=arm,
+                    embodiment=self._embodiment,
+                    error=ApiError(code=ErrorCode.INVALID_REQUEST, message=str(exc)),
+                )
             result = solve_with_context(
                 target_pose,
                 state,
                 arm=arm,
-                context=self._planning_context(state),
+                context=context,
+            )
+        elif self._embodiment.startswith("open_rail_"):
+            return IKResult(
+                ok=False,
+                arm=arm,
+                embodiment=self._embodiment,
+                error=ApiError(
+                    code=ErrorCode.UNSUPPORTED,
+                    message="Open-RAIL IK requires a provider accepting a robot planning context",
+                ),
             )
         else:
             result = provider.solve_ik(target_pose, state, arm=arm)
@@ -1540,23 +1567,30 @@ class CapApi:
                     message=f"object localization geometry failed: {exc}",
                 ),
             )
+        diagnostics = {
+            "camera_name": name,
+            "camera_frame": observation.cameras[name].frame,
+            "camera_timestamp_s": observation.cameras[name].timestamp_s,
+            "observation_timestamp_s": observation.timestamp_s,
+            "robot_state_timestamp_s": observation.robot_state.timestamp_s,
+            "snapshot_id": self._snapshot_id(
+                observation.cameras[name].frame, observation.cameras[name].timestamp_s
+            ),
+            "segmentation_source": "provider" if segmentation_from_provider else "supplied",
+            "instance_count": instance_count,
+        }
+        if observation.robot_state.embodiment.startswith("open_rail_"):
+            from .open_rail.snapshot_identity import snapshot_fingerprint
+
+            diagnostics["snapshot_fingerprint"] = snapshot_fingerprint(
+                observation.cameras[name], observation.robot_state
+            )
         return LocalizationResult(
             ok=True,
             geometry=geometry,
             segmentation=segmentation,
             point_cloud=point_cloud,
-            diagnostics={
-                "camera_name": name,
-                "camera_frame": observation.cameras[name].frame,
-                "camera_timestamp_s": observation.cameras[name].timestamp_s,
-                "observation_timestamp_s": observation.timestamp_s,
-                "robot_state_timestamp_s": observation.robot_state.timestamp_s,
-                "snapshot_id": self._snapshot_id(
-                    observation.cameras[name].frame, observation.cameras[name].timestamp_s
-                ),
-                "segmentation_source": "provider" if segmentation_from_provider else "supplied",
-                "instance_count": instance_count,
-            },
+            diagnostics=diagnostics,
         )
 
     @staticmethod
@@ -2168,8 +2202,18 @@ class CapApi:
             if not isinstance(context, RobotPlanningContext):
                 # Preserve the invalid-data ValueError contract.
                 raise ValueError("adapter get_planning_context() returned an invalid value")
+            if self._embodiment.startswith("open_rail_") and (
+                context.embodiment != state.embodiment
+                or set(context.arms) != set(state.arms)
+                or any(
+                    context.joint_names[arm] != state.joint_names[arm] for arm in state.arms
+                )
+            ):
+                raise ValueError("Open-RAIL planning context must match the observed robot state")
             if set(context.arms) == set(state.arms):
                 return context
+        if self._embodiment.startswith("open_rail_"):
+            raise ValueError("Open-RAIL requires an explicit robot planning context")
         arms = state.arms
         identity = np.eye(4, dtype=np.float64)
         return RobotPlanningContext(

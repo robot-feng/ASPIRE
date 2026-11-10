@@ -1,7 +1,64 @@
 # Open-RAIL apple grasp implementation status
 
-Updated 2026-11-04 (Asia/Shanghai). This file is the current evidence index for
+Updated 2026-11-10 (Asia/Shanghai). This file is the current evidence index for
 the first AgiBot G1 apple grasp integration.
+
+## Current RGB-D calibration status
+
+- After reprinting the board at the operator's 100% setting, two RGB-D sessions
+  acquired 24 and 50 raw snapshots on 2026-11-09. They are under
+  `artifacts/open_rail/rgbd_board_100pct_20261109/` and
+  `artifacts/open_rail/rgbd_board_100pct_extra50_20261109/`. The robot was not
+  commanded to move. The earlier Open-RAIL observation/inference session was
+  stopped at the operator's request before the new capture; its control status
+  was already false. Capture used one read-only runtime at a time.
+- The combined RGB fit used 46 of 74 frames, with 0.535 px training RMS and
+  aggregate detected-corner spans of 86.7% by 85.4% of the frame. Fitting the
+  first session alone and estimating board poses in 27 second-session views
+  produced per-view RMS of 0.483 px median, 0.793 px at the 90th percentile,
+  and 1.913 px maximum. This is a held-out fit check, not a camera certificate.
+  See `artifacts/open_rail/rgbd_board_combined_20261109/` for the inputs,
+  fit, per-frame residuals and session holdout.
+- The extra session contains 50 complete raw RGB, depth, state and metadata
+  sets. A more conservative depth diagnostic finds 23 usable views, which
+  reduce to 18 candidate pose groups under its near-duplicate heuristic. Most
+  groups are near 0.30–0.40 m. Their agreement under assumed board size,
+  depth scale and registration is useful evidence, not independent verification
+  of those assumptions. Details are in
+  `artifacts/open_rail/rgbd_board_100pct_analysis_20261109/grouped_results.json`.
+- A paper-edge comparison in two first-session images gives candidate square
+  widths of 23.93 and 24.08 mm, assuming the full visible sheet is flat,
+  untrimmed A4. This is consistent with the print setting, but is not a physical
+  size measurement. Under a nominal 24 mm square and assumed aligned axial-Z
+  depth, 13 first-session views had a median inferred scale of 0.0009896 m per
+  raw unit. These assumptions and the unverified RGB-depth time tolerance mean
+  this is not yet an established device scale or registration.
+- The 2026-11-04 ChArUco RGB images yielded a **candidate** intrinsic fit from
+  17 views with 0.188 px reprojection RMS. Four held-out views had 0.15–0.24 px
+  RMS after fitting their board poses with intrinsics fixed. The candidate and
+  held-out results are in `artifacts/open_rail/charuco_session_20261104/`;
+  neither establishes camera-to-robot extrinsics or depth calibration.
+- On one saved RGB-D image of the printed board, 28 depth samples near detected
+  ChArUco corners had median raw value 552. The RGB fit, using the PDF's nominal
+  24 mm squares, placed the board at approximately 0.624 m; a hypothetical
+  0.001 m/raw-unit depth scale would give 0.552 m. A single plane does not
+  identify the cause of this discrepancy or prove registration. The actual
+  printed scale is unmeasured and must not be assumed to equal the PDF scale.
+- Independent estimates from two saved images, treating the visible paper as
+  an untrimmed, flat 297 × 210 mm A4 sheet, put the printed square at roughly
+  21.0 mm rather than the nominal 24 mm. Applying that hypothetical scale to
+  the RGB plane estimate gives about 0.546 m, near 552 raw depth units under the
+  hypothetical 1 mm/unit scale. Paper shape and the selected boundaries introduce
+  unquantified systematic error; this is a possible explanation, not a metric
+  calibration. Reproduction and annotated inputs are in
+  `artifacts/open_rail/rgbd_scale_investigation_20261109/`.
+- The former observation/inference client session was stopped at the operator's
+  request before the November 9 capture. On November 10 a new Open-RAIL web
+  process was present; its read-only status reported observing, inference and
+  control all stopped. Process/status checks are snapshots and do not reserve
+  control ownership for future use.
+- The current task uses head RGB-D; fisheye calibration is not a prerequisite.
+  No candidate calibration has been applied to the live robot configuration.
 
 ## Repository baseline
 
@@ -119,9 +176,14 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   mapping from this value to the candidate URDF's gripper joint angle or actual
   opening width has not been established; it cannot yet support swept-volume
   or grasp-width checks.
-- The cuRobo service has no G1 robot model. Its optional generic attached-sphere
-  path and `collision_aware` flag alone cannot establish collision clearance
-  for a G1 grasp or a lift carrying the apple.
+- cuRobo can load a local G1 model for offline experiments. A candidate based
+  on the installed `a2d_v01` URDF matched independent FK numerically, but a
+  saved-state synthetic-scene planning probe failed with `start_self_collision`.
+  The model, gripper geometry, TCP and locked head/waist posture are not
+  verified against the robot, so its trajectories are not marked collision-aware
+  for execution. Optional attached-object spheres do not by themselves establish
+  collision clearance for a grasp or lift. Offline evidence is under
+  `artifacts/open_rail/a2d_curobo_candidate_20261109/`.
 - On Orin, the isolated cuRobo CUDA 12.2 environment successfully planned a
   generic Franka motion through the ASPIRE HTTP client, including a separate
   test with a synthetic attached sphere. Logs and scripts are in

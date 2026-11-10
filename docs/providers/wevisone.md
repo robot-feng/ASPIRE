@@ -21,6 +21,24 @@ not emit an instance confidence score, so the required ASPIRE score is a neutral
 `0.5` and diagnostics explicitly state that it is not model confidence.
 Point-prompted segmentation is currently unsupported by this provider.
 
+For an explicitly enabled RGB-D pick workflow,
+`cap_harness.providers.depth_refined.DepthRefinedSegmentationProvider` wraps the
+text-segmentation provider. It rejects invalid depth, pixels far from the
+masked median depth, and ambiguous depth-connected components before target
+point-cloud construction. Configure all its depth and quality thresholds for
+the verified sensor and task; there are no device defaults. It requires the
+original unique WeVisOne result and matching calibrated `CameraObservation`;
+timestamps and RGB, depth, intrinsics and pose hashes bind the result to that
+observation. The original RGB-D image remains available for scene geometry.
+
+Wrap the combined provider in `TracedProvider(..., recorder, "wevisone")` and
+pass the same `RunRecorder` to `CapApi`. Its provider trace serializes the
+original and filtered masks as exact 0/1 uint8 arrays, alongside the thresholds
+and each stage's pixel counts. This preserves evidence through the existing
+`RunRecorder` payload format; without a traced recorder the caller must retain
+the diagnostics itself. Filtering does not establish object identity, depth
+registration or calibration and cannot remove background at the same depth.
+
 Run through the environment supervisor after registering the `wevisone`
 provider in `configs/environments.json`. The provider is separate from the
 robot SDK environment. Its model ID, host, port, and device are explicit service

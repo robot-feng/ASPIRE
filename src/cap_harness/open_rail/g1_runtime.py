@@ -63,6 +63,10 @@ class OpenRailSnapshot:
 
     @property
     def is_synchronized(self) -> bool:
+        # Time proximity alone is insufficient when the state and timestamps
+        # were obtained from different reads of an unlocked SDK buffer.
+        if self.metadata.get("state_timestamps_bind_state_values") is not True:
+            return False
         threshold_ms = self.metadata.get("maximum_rgb_depth_skew_ms")
         if threshold_ms is None or self.depth_timestamp_ns is None:
             return False
