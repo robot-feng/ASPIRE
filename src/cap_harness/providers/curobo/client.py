@@ -90,9 +90,11 @@ def _validate_attachment_ack(
         raise ValueError("cuRobo attachment diagnostics did not acknowledge caller-supplied spheres")
 
 
-def _validated_partition_payload(partition, scene, state, attached_object, *, preserve_observed_scene=False):
+def _validated_partition_payload(partition, scene, state, attached_object, *, preserve_observed_scene=False, preview_history=None, context=None, arm=None):
     """Rebuild a pixel partition before binding its exact scene to a request."""
     if partition is None:
+        if preview_history is not None:
+            raise ValueError("preview chain requires a pixel-partitioned scene")
         if preserve_observed_scene:
             raise ValueError("preserving observed background requires a pixel-partitioned scene")
         return None
@@ -103,7 +105,12 @@ def _validated_partition_payload(partition, scene, state, attached_object, *, pr
         raise ValueError("pixel-partitioned scene requires an attached object")
     verify_target_scene_partition(partition, scene)
     source_camera = partition.source_observation.cameras[partition.target_camera]
-    if snapshot_fingerprint(source_camera, state) != partition.snapshot_fingerprint:
+    if preview_history is not None:
+        if not preserve_observed_scene:
+            raise ValueError("preview chain requires preserved observed background")
+        from cap_harness.open_rail.preview_chain import verify_preview_history
+        verify_preview_history(preview_history, partition, state, context, arm)
+    elif snapshot_fingerprint(source_camera, state) != partition.snapshot_fingerprint:
         raise ValueError("planning state does not match the pixel-partitioned observation")
     points = np.ascontiguousarray(scene.point_cloud.points, dtype=np.float32)
     return {
@@ -392,6 +399,7 @@ class CuRoboProvider:
         attached_object: AttachedObjectGeometry | None,
         target_scene_partition: object | None,
         preserve_observed_scene: bool,
+        preview_history: object | None = None,
     ) -> PlanResult:
         if type(preserve_observed_scene) is not bool:
             return self._plan_failure("preserve_observed_scene must be a bool")
@@ -418,6 +426,7 @@ class CuRoboProvider:
             partition_payload = _validated_partition_payload(
                 target_scene_partition, scene, robot_state, attached_object,
                 preserve_observed_scene=preserve_observed_scene,
+                preview_history=preview_history, context=context, arm=arm,
             )
         except (TypeError, ValueError) as exc:
             return self._plan_failure("invalid pixel-partitioned scene", {"error": str(exc)})
@@ -502,6 +511,10 @@ class CuRoboProvider:
             diagnostics["robot_scene_carve_may_remove_support_points"] = not preserve_observed_scene
             diagnostics["target_interaction_verified"] = False
             diagnostics["occluded_space_verified"] = False
+        if preview_history is not None:
+            diagnostics["planning_start_is_hypothetical"] = True
+            diagnostics["target_reobserved"] = False
+            diagnostics["preview_only"] = True
         return PlanResult(
             ok=True,
             trajectory=trajectory,

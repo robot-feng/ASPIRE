@@ -290,6 +290,11 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
 
 - Open-RAIL adapter, shared API, runtime and provider contract checks pass with
   fakes; these do not establish real model inference or robot behavior.
+- A separate three-stage planning helper chains pregrasp, approach and lift
+  against one saved scene and the preceding predicted joint endpoint. Tests use
+  a simulated planner response; neither contact nor the attached apple is
+  observed, and the results are explicitly non-executable. This helper is not
+  yet connected to the apple task runner or a real G1 planning service.
 - The original YAM simulator adapter and motion-interlock tests passed 32 cases
   in an isolated aarch64 test environment with MuJoCo 3.3.0 and mink 0.0.13.
   No physical YAM was connected.
