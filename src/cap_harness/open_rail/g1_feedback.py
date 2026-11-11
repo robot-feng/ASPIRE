@@ -23,7 +23,11 @@ class G1FeedbackCalibration:
 
     ``right_motor_ids`` is in the exact command joint order. Gripper feedback
     must already be normalized in the native Open-RAIL command convention.
-    These declarations need physical verification; no defaults are provided.
+    ``gripper_measurement_timestamp_verified`` means the reported timestamp
+    advances with actual hardware measurements, not merely HAL republishes of
+    a cached measurement. A verified common clock alone cannot prove this.
+    These declarations need physical verification; no verification gate defaults
+    to true.
     """
 
     right_motor_ids: Sequence[int]
@@ -35,6 +39,7 @@ class G1FeedbackCalibration:
     max_sample_gap_s: float
     stable_duration_s: float
     minimum_samples: int
+    gripper_measurement_timestamp_verified: bool = False
 
     def __post_init__(self) -> None:
         ids = tuple(self.right_motor_ids)
@@ -47,6 +52,7 @@ class G1FeedbackCalibration:
         for name in (
             "right_motor_order_verified", "arm_position_velocity_units_verified",
             "gripper_feedback_convention_verified", "feedback_clock_verified",
+            "gripper_measurement_timestamp_verified",
         ):
             if getattr(self, name) is not True:
                 raise ValueError(f"feedback requires verified {name}")

@@ -71,6 +71,7 @@ def _calibration():
     return G1FeedbackCalibration(
         right_motor_ids=tuple(range(7)), right_motor_order_verified=True,
         arm_position_velocity_units_verified=True, gripper_feedback_convention_verified=True,
+        gripper_measurement_timestamp_verified=True,
         feedback_clock_verified=True, max_sample_age_s=1, max_sample_gap_s=0.05,
         stable_duration_s=0.1, minimum_samples=3,
     )
@@ -240,6 +241,7 @@ def test_ipc_frames_feed_observation_and_terminal_feedback_without_rpc(tmp_path,
     calibration = G1FeedbackCalibration(
         right_motor_ids=tuple(range(7)), right_motor_order_verified=True,
         arm_position_velocity_units_verified=True, gripper_feedback_convention_verified=True,
+        gripper_measurement_timestamp_verified=True,
         feedback_clock_verified=True, max_sample_age_s=1, max_sample_gap_s=0.15,
         stable_duration_s=0.3, minimum_samples=3,
     )

@@ -1,4 +1,4 @@
-"""CAP program: locate an apple and plan a collision-checked pregrasp.
+"""CAP program: localize an apple and its plate from one RGB-D snapshot.
 
 This stage uses the Open-RAIL task configuration supplied in TaskContext. It
 does not execute a trajectory: G1 contact, lift and hold verification require
@@ -74,6 +74,42 @@ def plan_apple_pregrasp():
     if not localization.ok:
         return {"ok": False, "stage": "localization", "error": localization.error}
 
+    # The destination is perceived from the very same captured Observation.
+    # This keeps apple and plate geometry tied to one RGB-D frame even if the
+    # two text-prompted segmentation calls run sequentially.
+    plate_localization = localize_object_from_observation(
+        "plate",
+        observation,
+        camera_name=camera_name,
+        require_single_instance=True,
+        min_valid_depth_points=minimum_depth_points,
+        min_valid_depth_fraction=minimum_depth_fraction,
+    )
+    if not plate_localization.ok:
+        return {
+            "ok": False,
+            "stage": "plate_localization",
+            "error": plate_localization.error,
+            "apple_localization": localization,
+        }
+    apple_snapshot_id = localization.diagnostics.get("snapshot_id")
+    plate_snapshot_id = plate_localization.diagnostics.get("snapshot_id")
+    apple_fingerprint = localization.diagnostics.get("snapshot_fingerprint")
+    plate_fingerprint = plate_localization.diagnostics.get("snapshot_fingerprint")
+    if (
+        not apple_snapshot_id
+        or apple_snapshot_id != plate_snapshot_id
+        or not apple_fingerprint
+        or apple_fingerprint != plate_fingerprint
+    ):
+        return {
+            "ok": False,
+            "stage": "snapshot_consistency",
+            "reason": "apple and plate must come from the same RGB-D and robot-state snapshot",
+            "apple_snapshot_id": apple_snapshot_id,
+            "plate_snapshot_id": plate_snapshot_id,
+        }
+
     grasps = generate_grasps_for_localization(
         localization,
         observation,
@@ -115,6 +151,8 @@ def plan_apple_pregrasp():
             "ok": False, "stage": "chain_preview_input", "snapshot_id": partition.snapshot_id,
             "partition": partition, "candidates": candidates, "preview_grasps": grasps,
             "preview_scene": get_planning_scene(observation),
+            "apple_localization": localization,
+            "plate_localization": plate_localization,
         }
 
     # The full observed scene is kept for pregrasp planning, including apple
@@ -148,6 +186,8 @@ def plan_apple_pregrasp():
                 "trajectory": plan.trajectory,
                 "preview_grasps": grasps,
                 "preview_scene": scene,
+                "apple_localization": localization,
+                "plate_localization": plate_localization,
             }
         failures.append("collision-checked pregrasp planning failed")
     return {"ok": False, "stage": "pregrasp_planning", "failures": failures,

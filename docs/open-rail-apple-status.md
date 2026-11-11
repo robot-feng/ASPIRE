@@ -5,6 +5,49 @@ the first AgiBot G1 apple grasp integration.
 
 ## Current RGB-D calibration status
 
+- On 2026-11-11 the operator presented the printed board for 30 additional
+  read-only RGB-D samples at `artifacts/open_rail/rgbd_board_65to100cm_20261111_ZTTne6/`.
+  The offline detector found 28 board views; a corner-motion heuristic grouped
+  these into approximately 10 poses, with frames 12–30 in one near-duplicate
+  group. Across 27 views with enough raw depth near corners, the nominal
+  median board depth ranged from about 0.327 to 0.620 m. Both pose depth and
+  inferred scale still depend on the unverified printed size, RGB-D alignment,
+  raw depth units and calibration; they are not a calibration certificate.
+  Results are in `artifacts/open_rail/rgbd_board_65to100cm_analysis_20261111/`.
+- Two further operator-assisted read-only collections preserved 15 and 40
+  RGB-D frames under `artifacts/open_rail/rgbd_board_far_20261111_iBVFQz/` and
+  `artifacts/open_rail/rgbd_board_fast_20261111_9mCkQr/`. The first had 14
+  detected views in approximately 14 pose groups; the second had 34 detected
+  views in approximately 18 groups, with its last 17 views near-duplicates.
+  Nominal median board depth was 0.326–0.620 m and 0.302–0.513 m respectively,
+  under candidate RGB intrinsics and the unmeasured nominal print size. The
+  faster capture used a requested 0.2 s interval, but the median RGB timestamp
+  interval was 0.733 s due to acquisition and saving overhead. Its RGB and
+  depth source times differed by -14.28 to +14.66 ms; clock domains and an
+  acceptable skew remain unverified. No new verified calibration is inferred.
+  Reports are in `artifacts/open_rail/rgbd_board_far_analysis_20261111/` and
+  `artifacts/open_rail/rgbd_board_fast_analysis_20261111/`.
+- A 15-frame static-scene check of the new bounded buffered capture mode is in
+  `artifacts/open_rail/rgbd_buffer_speed_20261111_gYUV06/`. At the unchanged
+  1280×800 RGB resolution and a requested zero interval, the median RGB source
+  timestamp spacing was 42.13 ms (about 24 Hz); all 15 RGB timestamps and 14
+  depth timestamps differed. RGB–depth source differences ranged from -8.81
+  to +12.83 ms. This is a short throughput observation, not a validated frame
+  synchronization tolerance or a guarantee for sustained capture; no device
+  action was sent. The worker again needed forced close and emitted the known
+  shared-memory tracker warnings.
+- An operator-assisted buffered sweep then captured 90 RGB frames in
+  `artifacts/open_rail/rgbd_board_buffered_20261111_0mUJ5w/`, with 90 distinct
+  RGB timestamps and 80 distinct depth timestamps. The median RGB interval was
+  37.65 ms, and 67 images yielded at least 12 detected board corners. A pixel
+  heuristic grouped the detected images into about 42 poses; 10 representative
+  groups had nominal board depth at least 0.52 m, but these included only seven
+  different depth frames. In one pair, the same depth frame was paired with RGB
+  frames 25 ms apart whose PnP-estimated board depths differed by 26.9 mm. This
+  is a warning about motion and RGB-D timing, not a metric measurement of board
+  motion or a verified synchronization limit. All distances depend on candidate
+  intrinsics and nominal print size. The source hashes and calculations are in
+  `artifacts/open_rail/rgbd_board_buffered_analysis_20261111/`.
 - After reprinting the board at the operator's 100% setting, two RGB-D sessions
   acquired 24 and 50 raw snapshots on 2026-11-09. They are under
   `artifacts/open_rail/rgbd_board_100pct_20261109/` and
@@ -84,6 +127,41 @@ the first AgiBot G1 apple grasp integration.
 - The current task uses head RGB-D; fisheye calibration is not a prerequisite.
   No candidate calibration has been applied to the live robot configuration.
 
+## Same-snapshot apple and plate detection
+
+- `examples/open_rail/pick_apple.py` now localizes both `apple` and `plate` from
+  the same captured `Observation`. The two text-prompted WeVisOne calls are
+  sequential, but both consume the exact same RGB-D and robot-state snapshot;
+  mismatched snapshot IDs/fingerprints or a missing plate stop the preview
+  before grasp generation. The plate is contextual destination perception;
+  placement and robot motion are still not implemented or verified.
+- A read-only saved snapshot at
+  `artifacts/open_rail/apple_after_calibration_20261111_lVytS3/` was segmented
+  with WeVisOne-VL using `apple` and `pink plate` prompts against the same RGB
+  image. It returned one apple mask (6,734 pixels) and one plate mask (16,425
+  pixels). The respective masks covered 6,383 and 16,324 nonzero raw depth
+  samples. Their raw Z16 p05/median/p95 values were 559/570/590 and
+  628/673/708. `apple_plate_same_frame_overlay.png` shows both masks on that
+  frame. These raw values are not metric distances: depth scale and RGB-depth
+  registration are still unverified, and the associated robot-state timestamps
+  are not bound to the state values. This demonstrates paired image-space
+  detection only, not a calibrated apple-to-plate transform or placement plan.
+
+## ASPIRE task pattern and waypoint policy
+
+- The simulated `examples/libero/object_swap_seed1.py` and
+  `examples/robosuite/cube_lifting_seed1.py` use a small grasp sequence: move
+  above the target, descend with a fixed gripper orientation, close, then lift.
+  The Open-RAIL task follows ASPIRE's observation/localization, GraspGen-X,
+  `plan_motion` and scene APIs; WeVisOne-VL supplies the apple and plate masks.
+- For G1 contact work, keep the selected grasp orientation fixed and use only
+  the necessary key poses: pregrasp, short approach, and lift. Reobserve before
+  contact if the snapshot or object geometry has become stale. The count of
+  target poses alone does not control the planner's intermediate TCP posture;
+  the full timed joint path still needs validated FK, limits, collision and
+  tracking checks before execution. The current chain preview is not executable
+  and makes hypothetical post-stage-state assumptions.
+
 ## Repository baseline
 
 | Component | Pinned/current revision | Working tree |
@@ -101,6 +179,14 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
 
 - The local CAP MCP tool graph is not available in this session, so no registered
   robot observation or control command can be issued here.
+- On 2026-11-11 a single read-only Open-RAIL capture at
+  `artifacts/open_rail/live_readonly_20261111_GLY9dK/` received RGB, raw Z16
+  and state. The frame shows a red apple to the right of a pink dish. Its RGB
+  and depth timestamps differ by 18.35 ms; the synchronization tolerance,
+  clock domains, depth calibration and camera-to-base transform remain
+  unverified. This historical frame does not establish the present scene or
+  workspace clearance. The worker again required termination after its close
+  timeout and emitted shared-memory tracker warnings; no motion was commanded.
 - On 2026-11-10, read-only G1 capture with a separate DDS subscriber node
   obtained bound values and timestamps for arm, head, waist and both grippers,
   alongside RGB and raw depth. Three saved snapshots passed a **configured,
@@ -168,6 +254,40 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   established. No cancellation or gripper service was called. The audited
   paths, SHA-256 hashes and a reproducible in-memory packet probe are indexed at
   `artifacts/open_rail/g1_control_protocol_audit_20261111/`.
+- A static inspection of the installed `/home/agi/app/bin/hal` aarch64 binary
+  (SHA-256 `1ebf199163862611e78d5299becbb51db1147be5a862c253fc228b4ded290309`)
+  found that the demangled OmniPicker `SetForce` and `SetVelocity` symbols share
+  address `0x1f19c0`, where the entire machine-code body is `mov w0, #1; ret`.
+  `GetVelocity` and `SetMode` likewise immediately return 1 without touching
+  their arguments. Under the ordinary aarch64 ABI and these symbol identities,
+  these disk-binary methods do not configure force or speed or fill velocity
+  output; the meaning of return value 1 is not established. A running HAL
+  process reports that pathname in its command line, but `/proc/<pid>/exe`
+  access was denied, so the inode and executable digest could not be checked.
+  This does not establish firmware behavior, actual gripper limits or other
+  control paths. The local right-hand version file reports `omnipicker` and
+  firmware `141`, which is not an independent online identity verification.
+  The read-only symbol/disassembly reproduction and file hashes are in
+  `artifacts/open_rail/omnipicker_hal_static_audit_20261111/`. No device or
+  control service was opened.
+- In the same disk binary, a `ParseMsgFrame` branch stores a byte from message
+  offset 11 scaled by 30/255 into object offset 192. `GetForce` reads the same
+  offset and stamps the returned value using `Clock::PTP::now()` when called,
+  rather than copying the CAN-source timestamp. This is a static offset and ABI
+  interpretation: the byte's meaning, units, source, update age and actual
+  publication are unknown. The returned timestamp alone cannot establish when
+  the sensor was sampled; neither a force sensor nor a safe force threshold is
+  established by this finding. The disassembly is retained in the same audit.
+- Static vtable and call-site analysis indicates `RightHandPublish` calls the
+  OmniPicker joint, current, force and status getters with a shared timestamp
+  destination. The status getter stamps that destination with PTP now and checks
+  a roughly three-second internal last-message timeout. If this matches the live
+  binary, repeated publisher timestamps can advance while the underlying cached
+  measurement has not changed. `G1FeedbackCalibration` therefore requires
+  independent verification that gripper timestamps identify actual new hardware
+  measurements; a verified clock or advancing message header alone is not
+  enough. This prerequisite is currently unverified and is not enabled for G1.
+  The trace is a disk-binary/ABI inference, not a physical disconnect test.
 - G1 RGB camera parameters exist at `/data/parameters/head_intrinsic_params.json`;
   a head extrinsic file also exists at
   `/data/parameters/head_extrinsic_params.json`. Their association to the current
@@ -237,6 +357,24 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   config SHA-256 is `3b4abc1e79e31a6d01d16866bba19909fb4d9dce5132cc9d5e9e5abb2ad25caf`;
   the publisher library SHA-256 is
   `ddd7d88f9c7afddd59735d5c63874dc03e0c8a92add681a33888668536d42e2b`.
+- The manufacturer's [D457 datasheet, table 4-2](https://realsenseai.com/wp-content/uploads/2025/08/RealSense-D457-Datasheet-Aug_2025.pdf)
+  lists 1280×720 Z16 depth and 1280×800 RGB as separate native GMSL stream
+  formats. The historical 1280×800 depth packet therefore requires an explanation
+  in the configured stream, processing chain, or packet metadata; matching the
+  RGB dimensions does not establish registration. The [RealSense SDK projection
+  documentation](https://github.com/realsenseai/librealsense/wiki/Projection-in-RealSense-SDK-2.0)
+  describes 1 mm per count as the D400 default, while explicitly permitting
+  the depth-unit setting to change. This is independent support for the
+  diagnostic's 0.001 m/count hypothesis, not a measurement or proof of this
+  camera's configured scale, alignment, timing or current serial number.
+- The same datasheet's table 4-4 lists a nominal minimum Z of 520 mm for the
+  D450 module at native 1280×720 depth resolution; D457 contains that module.
+  Many previously sampled board poses were nominally 300–400 mm from RGB, while
+  the historical apple's assumed median raw depth corresponds to about 594 mm.
+  The former are therefore particularly poor independent evidence of depth
+  scale or surface identity under that native-mode specification. Actual
+  stream processing, depth settings, pose and scale remain unverified: this
+  nominal figure alone cannot classify individual recorded pixels as invalid.
 - A local registration *diagnostic* compares the saved WeVisOne apple mask to
   thresholded raw depth in the same historical frame, searching translations
   within a 100-pixel margin. For raw intervals [570,615), [575,620) and
@@ -393,6 +531,15 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   effect of the exclusion list; it does not establish that those exclusions or
   the resulting trajectory are safe on the physical robot. Evidence is in
   `artifacts/open_rail/a2d_curobo_collision_audit_20261110/`.
+- A later isolated cuRobo diagnostic used the historical apple frame, its first
+  actual GraspGen-X candidate, candidate camera and gripper transforms and the
+  candidate G1 model. The whole observed depth scene was retained, including
+  the apple. The stock service rejected points beyond 5 m; an isolated 7 m
+  experiment returned `no_result`, although its start-state check passed. This
+  is not proof of unreachability: calibration, kinematics, gripper geometry and
+  the cause of the planning failure are unresolved. No trajectory was returned
+  or sent. Inputs and logs are in
+  `artifacts/open_rail/apple_g1_planning_diagnostic_20261111/`.
 - On Orin, the isolated cuRobo CUDA 12.2 environment successfully planned a
   generic Franka motion through the ASPIRE HTTP client, including a separate
   test with a synthetic attached sphere. Logs and scripts are in

@@ -16,11 +16,19 @@ def _calibration(**changes):
     values = dict(
         right_motor_ids=(3, 4, 5, 6, 0, 1, 2), right_motor_order_verified=True,
         arm_position_velocity_units_verified=True, gripper_feedback_convention_verified=True,
+        gripper_measurement_timestamp_verified=True,
         feedback_clock_verified=True, max_sample_age_s=1.0, max_sample_gap_s=0.05,
         stable_duration_s=0.1, minimum_samples=3,
     )
     values.update(changes)
     return G1FeedbackCalibration(**values)
+
+
+def test_gripper_feedback_rejects_clock_only_without_verified_measurement_timestamps():
+    # A HAL publisher can repeatedly stamp the same cached gripper position
+    # with a fresh message timestamp; a synchronized clock is not enough.
+    with pytest.raises(ValueError, match="gripper_measurement_timestamp_verified"):
+        _calibration(gripper_measurement_timestamp_verified=False)
 
 
 class _ScriptedSamples(G1StateSamples):

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Literal
 
 import numpy as np
 
 from cap_harness.contracts import LocalizationResult, Observation, Pose
+from cap_harness.geometry import estimate_geometry, mask_to_point_cloud
 from cap_harness.open_rail.snapshot_identity import snapshot_fingerprint
 
 
@@ -168,6 +170,25 @@ class HoldVerifier:
             raise ValueError("localization does not belong to this robot state")
         if localization.diagnostics.get("snapshot_fingerprint") != snapshot_fingerprint(camera, state):
             raise ValueError("localization does not match this camera and robot state content")
+        mask, cloud = localization.segmentation, localization.point_cloud
+        if mask is None or cloud is None:
+            raise ValueError("object mask and point cloud are required for hold verification")
+        if (mask.camera_name not in (self.camera_name, camera.frame) or mask.frame != camera.frame
+                or localization.diagnostics.get("target_mask_sha256")
+                != hashlib.sha256(mask.mask.tobytes()).hexdigest()):
+            raise ValueError("object mask does not match the localized target")
+        try:
+            projected = mask_to_point_cloud(camera, mask, target_frame=state.base_frame)
+            derived = estimate_geometry(projected)
+        except ValueError as exc:
+            raise ValueError(f"cannot reconstruct localized target geometry: {exc}") from exc
+        geometry = localization.geometry
+        if (cloud.frame != projected.frame or not np.array_equal(cloud.points, projected.points)
+                or geometry.frame != derived.frame
+                or not np.allclose(geometry.pose.as_matrix(), derived.pose.as_matrix(), rtol=0, atol=1e-8)
+                or not np.allclose(geometry.extents, derived.extents, rtol=0, atol=1e-8)
+                or geometry.point_count != derived.point_count):
+            raise ValueError("object point cloud or geometry differs from the observed target")
         tool = state.end_effector_poses.get(self.arm)
         if tool is None or tool.frame != state.base_frame:
             raise ValueError("tool pose is unavailable in the robot base frame")

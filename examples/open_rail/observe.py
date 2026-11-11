@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import math
 import os
@@ -16,11 +17,46 @@ from PIL import Image
 
 from cap_harness.open_rail.g1_runtime import OpenRailG1ObservationRuntime
 
+MAX_BUFFERED_SAMPLES = 200
+MAX_BUFFER_MIB = 1024.0
+SNAPSHOT_FILES = ("head_rgb.png", "head_depth_u16.npy", "robot_state.npy", "arm_velocity_raw.npy", "snapshot.json")
+
+
+def buffered_copy(snapshot):
+    """Copy a raw snapshot so a subsequent read cannot mutate captured data."""
+    frozen = deepcopy(snapshot)
+    for name in ("rgb", "depth_u16", "state", "arm_velocity_raw", "arm_velocities_rad_s"):
+        value = getattr(frozen, name, None)
+        if isinstance(value, np.ndarray):
+            value.setflags(write=False)
+    return frozen
+
+
+def buffered_size(snapshot) -> int:
+    """Account for retained arrays and JSON metadata before allocating a copy."""
+    size = len(json.dumps(snapshot.metadata, allow_nan=False).encode("utf-8"))
+    size += len(json.dumps(snapshot.state_timestamps_ns, allow_nan=False).encode("utf-8"))
+    for name in ("rgb", "depth_u16", "state", "arm_velocity_raw", "arm_velocities_rad_s"):
+        value = getattr(snapshot, name, None)
+        if isinstance(value, np.ndarray):
+            size += value.nbytes
+    return size
+
+
+def persist_sample(snapshot, output: Path, index: int, total: int) -> None:
+    destination = output if total == 1 else output / f"sample_{index:04d}"
+    if total > 1:
+        destination.mkdir(exist_ok=False)
+    metadata = save_snapshot(snapshot, destination)
+    if total == 1:
+        print(json.dumps(metadata, indent=2, sort_keys=True), flush=True)
+    else:
+        print(json.dumps({"sample": str(destination), "rgb_timestamp_ns": snapshot.rgb_timestamp_ns}), flush=True)
+
 
 def save_snapshot(snapshot, output: Path) -> dict:
     """Preserve decoded RGB, unscaled depth, raw state and source timestamps."""
-    names = ("head_rgb.png", "head_depth_u16.npy", "robot_state.npy", "arm_velocity_raw.npy", "snapshot.json")
-    if any((output / name).exists() for name in names):
+    if any((output / name).exists() for name in SNAPSHOT_FILES):
         raise FileExistsError(f"snapshot output already exists in {output}")
     Image.fromarray(snapshot.rgb).save(output / "head_rgb.png")
     if snapshot.depth_u16 is not None:
@@ -66,15 +102,35 @@ def main() -> int:
     )
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--interval", type=float, default=2.5, help="seconds between samples")
+    parser.add_argument(
+        "--buffered", action="store_true",
+        help="keep bounded snapshots in memory and write them after capture, including on capture failure",
+    )
+    parser.add_argument(
+        "--buffer-limit-mib", type=float, default=512.0,
+        help="maximum retained array and serialized metadata size in MiB with --buffered (at most 1024)",
+    )
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be positive")
     if not math.isfinite(args.interval) or args.interval < 0:
         parser.error("--interval must be finite and nonnegative")
+    if not math.isfinite(args.buffer_limit_mib) or not 0 < args.buffer_limit_mib <= MAX_BUFFER_MIB:
+        parser.error("--buffer-limit-mib must be positive and at most 1024")
+    if args.buffered and args.samples > MAX_BUFFERED_SAMPLES:
+        parser.error(f"--buffered supports at most {MAX_BUFFERED_SAMPLES} samples")
     if args.broadcast and not args.bound_state_sampling:
         parser.error("--broadcast requires --bound-state-sampling")
 
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.buffered:
+        destinations = (
+            (args.output / name for name in SNAPSHOT_FILES)
+            if args.samples == 1
+            else (args.output / f"sample_{index:04d}" for index in range(1, args.samples + 1))
+        )
+        if any(path.exists() for path in destinations):
+            raise FileExistsError("buffered output already contains a requested snapshot destination")
     with OpenRailG1ObservationRuntime(
         open_rail_root=args.open_rail_root,
         maximum_rgb_depth_skew_ms=args.maximum_skew_ms,
@@ -89,6 +145,8 @@ def main() -> int:
             )
             broadcaster.start()
         reader = broadcaster or runtime
+        buffered = []
+        buffer_size = 0
         try:
             last_timestamp = None
             for index in range(1, args.samples + 1):
@@ -98,14 +156,15 @@ def main() -> int:
                 if last_timestamp is not None and snapshot.rgb_timestamp_ns <= last_timestamp:
                     raise RuntimeError("RGB snapshot timestamp did not advance")
                 last_timestamp = snapshot.rgb_timestamp_ns
-                output = args.output if args.samples == 1 else args.output / f"sample_{index:04d}"
-                if args.samples > 1:
-                    output.mkdir(exist_ok=False)
-                metadata = save_snapshot(snapshot, output)
-                if args.samples == 1:
-                    print(json.dumps(metadata, indent=2, sort_keys=True), flush=True)
+                if args.buffered:
+                    sample_size = buffered_size(snapshot)
+                    if buffer_size + sample_size > args.buffer_limit_mib * 1024 * 1024:
+                        raise MemoryError("buffer limit exceeded; previously captured samples will be saved")
+                    buffered.append((index, buffered_copy(snapshot)))
+                    buffer_size += sample_size
+                    print(json.dumps({"captured": index, "rgb_timestamp_ns": last_timestamp}), flush=True)
                 else:
-                    print(json.dumps({"sample": str(output), "rgb_timestamp_ns": last_timestamp}), flush=True)
+                    persist_sample(snapshot, args.output, index, args.samples)
             if broadcaster is not None:
                 feedback = {
                     "right_arm": broadcaster.feedback_samples.wait_next_right_arm(0, 0),
@@ -116,8 +175,12 @@ def main() -> int:
                     json.dump(feedback, output, indent=2)
                     output.write("\n")
         finally:
-            if broadcaster is not None:
-                broadcaster.close()
+            try:
+                if broadcaster is not None:
+                    broadcaster.close()
+            finally:
+                for index, snapshot in buffered:
+                    persist_sample(snapshot, args.output, index, args.samples)
     return 0
 
 

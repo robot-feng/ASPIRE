@@ -76,6 +76,15 @@ When candidate generation succeeds, the recorder also writes
 and approach directions. It is a visualization, not a collision or reachability
 certificate, and does not depict a guessed physical gripper.
 
+The read-only `examples/open_rail/observe.py` writes every frame immediately by
+default. Optional `--buffered` snapshots are copied into memory and saved in
+capture order after collection, including when collection raises an exception.
+Buffering permits at most 200 frames and limits retained array and serialized
+metadata sizes to 512 MiB by default; `--buffer-limit-mib` may set a positive
+limit up to 1024 MiB. Python and runtime overhead are additional. Sudden process
+termination or power loss can still lose frames not yet written, and this mode
+does not establish a device sampling rate or timestamp synchronization.
+
 For an observed target already attached to the tool, the Open-RAIL CAP API
 can partition the target and environment using the target's pixels from the
 same observation. Pass the resulting scene and partition together with the
@@ -101,3 +110,6 @@ The caller must establish that the initial object was on the table, validate
 observation freshness, and supply thresholds and the vertical direction from
 the calibrated robot setup. Missing detections, timestamp mismatches, or gaps
 reset the evidence window; they do not count as a successful grasp.
+Each hold sample must also carry the original target mask and point cloud. The
+verifier reprojects the mask through that snapshot and recomputes its geometry;
+inconsistent target evidence resets the window rather than proving a hold.

@@ -122,7 +122,10 @@ def test_preview_wires_real_clients_and_reuses_one_snapshot(
         calls.append((url, kwargs.get("json")))
         if ":8117/" in url:
             mask = np.zeros((8, 10), dtype="<f4")
-            mask[1:7, 1:9] = 1
+            if kwargs["json"]["query"] == "apple":
+                mask[1:7, 0:4] = 1
+            else:
+                mask[1:7, 6:10] = 1
             return Response({"results": [{
                 "label": "apple", "box_xyxy": [1, 1, 9, 7], "shape": [8, 10],
                 "probabilities_base64": base64.b64encode(mask.tobytes()).decode(),
@@ -153,11 +156,13 @@ def test_preview_wires_real_clients_and_reuses_one_snapshot(
     assert result.ok, result.error
     assert result.result["stage"] == expected_stage
     assert result.result["ok"] is False
-    assert len(calls) == 3
-    assert ":8117/" in calls[0][0] and ":8120/" in calls[1][0] and ":8118/" in calls[2][0]
-    assert calls[2][1]["model"] == "agibot_g1"
+    assert len(calls) == 4
+    assert ":8117/" in calls[0][0] and ":8117/" in calls[1][0]
+    assert [calls[i][1]["query"] for i in (0, 1)] == ["apple", "plate"]
+    assert ":8120/" in calls[2][0] and ":8118/" in calls[3][0]
+    assert calls[3][1]["model"] == "agibot_g1"
     assert control.commands == []
-    assert list(recorder.root.glob("trace/calls/*wevisone-segment-text/output.json"))
+    assert len(list(recorder.root.glob("trace/calls/*wevisone-segment-text/output.json"))) == 2
     preview = (recorder.root / "media/grasp-candidates.ply").read_text()
     assert '"snapshot_id":"head_optical@12.000000000"' in preview
     assert '"collision_checked":false' in preview
@@ -214,7 +219,10 @@ def test_optional_chain_uses_same_mask_snapshot_and_never_commands_robot(monkeyp
         calls.append((url, payload))
         if ":8117/" in url:
             mask = np.zeros((8, 10), dtype="<f4")
-            mask[1:7, 1:9] = 1
+            if payload["query"] == "apple":
+                mask[1:7, 0:4] = 1
+            else:
+                mask[1:7, 6:10] = 1
             return Response({"results": [{"label": "apple", "box_xyxy": [1, 1, 9, 7],
                              "shape": [8, 10], "probabilities_base64": base64.b64encode(mask.tobytes()).decode()}],
                              "total_instances": 1, "truncated": False})

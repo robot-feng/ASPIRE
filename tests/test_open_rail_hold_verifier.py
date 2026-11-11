@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 
 import numpy as np
 import pytest
@@ -8,11 +9,12 @@ import pytest
 from cap_harness.contracts import (
     CameraObservation,
     LocalizationResult,
-    ObjectGeometry,
     Observation,
     Pose,
     RobotState,
+    Segmentation,
 )
+from cap_harness.geometry import estimate_geometry, mask_to_point_cloud
 from cap_harness.open_rail.verification import HoldVerifier
 from cap_harness.open_rail.hold_replay import HoldReplaySample, replay_hold
 from cap_harness.open_rail.snapshot_identity import snapshot_fingerprint
@@ -29,10 +31,10 @@ def _pose(x: float, z: float) -> Pose:
 def _sample(timestamp: float, object_x: float, object_z: float, tool_z: float):
     camera = CameraObservation(
         rgb=np.zeros((2, 2, 3), dtype=np.uint8),
-        depth_m=np.ones((2, 2)),
-        intrinsics=np.eye(3),
+        depth_m=np.array([[1.0, 1.01], [1.02, 1.04]]),
+        intrinsics=np.diag([100.0, 100.0, 1.0]),
         frame="head_optical",
-        camera_pose=_pose(0.0, 0.0),
+        camera_pose=_pose(object_x, object_z - 1.0),
         timestamp_s=timestamp,
     )
     state = RobotState(
@@ -45,9 +47,11 @@ def _sample(timestamp: float, object_x: float, object_z: float, tool_z: float):
         embodiment="open_rail_7dof",
     )
     observation = Observation(cameras={"head": camera}, robot_state=state, timestamp_s=timestamp)
+    mask = Segmentation(np.ones((2, 2), dtype=bool), "apple", 1.0, "head", camera.frame)
+    cloud = mask_to_point_cloud(camera, mask, target_frame="base")
     localization = LocalizationResult(
         ok=True,
-        geometry=ObjectGeometry(pose=_pose(object_x, object_z), extents=np.full(3, 0.08)),
+        geometry=estimate_geometry(cloud), segmentation=mask, point_cloud=cloud,
         diagnostics={
             "snapshot_id": f"head_optical@{timestamp:.9f}",
             "robot_state_timestamp_s": timestamp,
@@ -55,6 +59,7 @@ def _sample(timestamp: float, object_x: float, object_z: float, tool_z: float):
             "segmentation_source": "provider",
             "instance_count": 1,
             "snapshot_fingerprint": snapshot_fingerprint(camera, state),
+            "target_mask_sha256": hashlib.sha256(mask.mask.tobytes()).hexdigest(),
         },
     )
     return observation, localization
@@ -105,6 +110,28 @@ def test_hold_rejects_changed_camera_content_with_unchanged_timestamp() -> None:
 
     assert evidence.status == "unknown"
     assert "content" in evidence.reason
+
+
+@pytest.mark.parametrize("defect", ["missing_mask", "mask", "cloud", "geometry"])
+def test_hold_rejects_target_evidence_not_derived_from_the_observation(defect) -> None:
+    verifier = _verifier()
+    observation, localization = _sample(2.0, 0.0, 0.15, 0.20)
+    if defect == "missing_mask":
+        localization = replace(localization, segmentation=None)
+    elif defect == "mask":
+        altered = np.array(localization.segmentation.mask)
+        altered[0, 0] = False
+        localization = replace(localization, segmentation=replace(localization.segmentation, mask=altered))
+    elif defect == "cloud":
+        localization = replace(localization, point_cloud=replace(
+            localization.point_cloud, points=localization.point_cloud.points + [0, 0, 0.1]
+        ))
+    else:
+        geometry = localization.geometry
+        pose = replace(geometry.pose, position=geometry.pose.position + [0, 0, 0.1])
+        localization = replace(localization, geometry=replace(geometry, pose=pose))
+    evidence = verifier.observe(observation, localization)
+    assert evidence.status == "unknown"
 
 
 def test_occlusion_and_gaps_reset_hold_window() -> None:
@@ -181,25 +208,21 @@ def test_relative_position_uses_the_rotating_tool_frame() -> None:
         frame="base",
     )
     rotated_state = replace(observation.robot_state, end_effector_poses={"right": rotated_tool})
-    rotated_object = ObjectGeometry(
-        pose=Pose(
-            position=np.array([0.0, 0.03, 0.15]),
-            quaternion_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
-            frame="base",
-        ),
-        extents=np.full(3, 0.08),
+    rotated_camera = replace(
+        observation.cameras["head"],
+        camera_pose=Pose([0.0, 0.03, -0.85], [2**-0.5, 0.0, 0.0, 2**-0.5], "base"),
     )
+    rotated_cloud = mask_to_point_cloud(rotated_camera, localized.segmentation, target_frame="base")
 
     evidence = verifier.observe(
-        replace(observation, robot_state=rotated_state),
+        replace(observation, cameras={"head": rotated_camera}, robot_state=rotated_state),
         replace(
             localized,
-            geometry=rotated_object,
+            geometry=estimate_geometry(rotated_cloud),
+            point_cloud=rotated_cloud,
             diagnostics={
                 **localized.diagnostics,
-                "snapshot_fingerprint": snapshot_fingerprint(
-                    observation.cameras["head"], rotated_state
-                ),
+                "snapshot_fingerprint": snapshot_fingerprint(rotated_camera, rotated_state),
             },
         ),
     )
