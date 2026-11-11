@@ -9,7 +9,6 @@ import functools
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 from pathlib import Path
@@ -33,6 +32,7 @@ from .attachment import (
     pose7_to_matrix,
 )
 from .dual import build_dual_panda_config
+from .sparse_scene import SparseSceneLimitError, sparse_voxel_mesh
 from .wire import IK_PATH, PLAN_PATH, PLAN_SYNCHRONIZED_PATH
 
 app = FastAPI(title="cap-harness cuRobo V2 provider")
@@ -715,8 +715,18 @@ def _voxelized_scene_mesh(
     )
 
 
+def _sparse_voxelized_scene_mesh(points: np.ndarray, *, voxel_size_m: float,
+                                 mesh_type: Any | None = None) -> Any:
+    vertices, faces = sparse_voxel_mesh(points, float(voxel_size_m))
+    if mesh_type is None:
+        from curobo._src.geom.types import Mesh
+
+        mesh_type = Mesh
+    return mesh_type("public_rgbd_scene", pose=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                     vertices=vertices.tolist(), faces=faces.flatten().tolist())
+
+
 _SCENE_MAX_RANGE_M = 5.0
-_PRESERVED_SCENE_MAX_GRID_CELLS = 25_000_000
 
 
 def _drop_distant_points(
@@ -829,16 +839,9 @@ def _scene(request: BaseRequest, robot: Any | None = None) -> Any | None:
         raise HTTPException(status_code=400, detail="scene points must be finite")
     preserve = request.target_scene_partition is not None and request.target_scene_partition.mode == "pixel_partition_v2"
     if preserve:
-        # Never silently delete a distant observation, while also avoiding the
-        # unbounded dense grid allocation that motivated the legacy filter.
-        if np.any(np.linalg.norm(points, axis=1) > _SCENE_MAX_RANGE_M):
-            raise HTTPException(status_code=422, detail="preserved scene has points outside the supported range")
         pitch = float(request.voxel_size_m)
         if not np.isfinite(pitch) or pitch <= 0:
             raise HTTPException(status_code=400, detail="preserved scene voxel size must be positive and finite")
-        grid_shape = np.ceil(np.ptp(points.astype(np.float64), axis=0) / pitch) + 5
-        if not np.all(np.isfinite(grid_shape)) or math.prod(grid_shape.tolist()) > _PRESERVED_SCENE_MAX_GRID_CELLS:
-            raise HTTPException(status_code=422, detail="preserved scene exceeds the supported voxel grid")
     else:
         points = _drop_distant_points(points)
     if len(points) == 0:
@@ -860,11 +863,19 @@ def _scene(request: BaseRequest, robot: Any | None = None) -> Any | None:
         # PointCloud.get_mesh() silently uses cuRobo's 2 cm default pitch.
         # Preserve the public scene resolution so filtered 1 cm voxels do not
         # expand back into the robot and invalidate otherwise feasible goals.
-        obstacle = _voxelized_scene_mesh(
-            points,
-            voxel_size_m=request.voxel_size_m,
-        )
+        if preserve:
+            # Build a bounded sparse surface without discarding distant points,
+            # robot points, or geometry near a target or its support surface.
+            obstacle = _sparse_voxelized_scene_mesh(points, voxel_size_m=pitch)
+        else:
+            obstacle = _voxelized_scene_mesh(points, voxel_size_m=request.voxel_size_m)
         return Scene(mesh=[obstacle])
+    except SparseSceneLimitError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        if preserve:
+            raise HTTPException(status_code=422, detail=f"preserved scene invalid: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"scene conversion failed: {exc}") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"scene conversion failed: {exc}") from exc
 

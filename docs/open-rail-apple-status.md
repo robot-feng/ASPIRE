@@ -129,6 +129,37 @@ the first AgiBot G1 apple grasp integration.
 
 ## Same-snapshot apple and plate detection
 
+- An offline replay of the third bound RGB-D/state snapshot at
+  `artifacts/open_rail/g1_bound_observe_20261111_8GqEZM/sample_0003/`
+  detected one apple and one plate on the same image and generated eight
+  GraspGen-X candidates. The full 716,900-point scene was rejected by the
+  stock planner's 5 m range limit. A separate diagnostic with a workspace crop
+  tried all eight pregrasp poses; none produced a trajectory. A six-seed CPU
+  IK diagnostic also did not meet its end-effector position-and-angle tolerance.
+  These failures do not establish that the poses are physically unreachable:
+  RGB-D scale and registration, clock alignment, camera-to-base transform,
+  gripper frame and collision model remain unverified. The cropped run omits
+  much of the observed scene and is not executable. Inputs and results are in
+  `artifacts/open_rail/g1_bound_offline_grasp_20261111/`.
+- A bounded sparse voxel mesh now allows the entire saved point cloud through
+  the preserved-scene path without the previous dense-grid/range rejection.
+  An isolated cuRobo GPU replay using all 716,900 points returned `no_result`
+  for the first pregrasp at both 2.5 cm and 1 cm voxel sizes; neither run
+  produced a trajectory. A small synthetic CUDA signed-distance comparison
+  matched the dense mesh at the sampled points. The observed scene, robot
+  model and grasp transforms remain unverified and the result is not a safety
+  check. Inputs, memory observations, limitations and logs are in
+  `artifacts/open_rail/g1_sparse_curobo_20261111_IwE6DK/`.
+- A subsequent CPU geometry audit found a conditional explanation for the
+  eight failed pregrasps. Under the same candidate camera transform and the
+  model-only assumption that the GraspGen-X base is arm link 7, their positions
+  lie 26–328 mm beyond the 683 mm triangle-inequality upper bound from the
+  right arm's first revolute joint to link 7. The corresponding grasp poses are
+  11–258 mm beyond it. The bound ignores joint limits and collisions and is
+  conditional on unverified camera, depth, tool and robot-model geometry; it
+  does not establish real-world reachability or a calibration correction.
+  The URDF segments, per-candidate distances and input hashes are in
+  `artifacts/open_rail/g1_cpu_ik_root_cause_20261111/geometry_bound_report.json`.
 - `examples/open_rail/pick_apple.py` now localizes both `apple` and `plate` from
   the same captured `Observation`. The two text-prompted WeVisOne calls are
   sequential, but both consume the exact same RGB-D and robot-state snapshot;
@@ -233,6 +264,14 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   is a short historical observation, not evidence of current stillness or
   of gripper measurement freshness. No command was sent; the worker again
   needed forced termination during close.
+- In the third snapshot, an offline comparison of apple color segmentation to
+  a depth-foreground mask found zero-offset IoU about 0.91. Varying the depth
+  threshold changed the best candidate displacement by several pixels; the
+  plate and box had depth holes and provided weaker checks. This rejects no
+  small misregistration and does not establish depth units or synchronization,
+  but found no obvious large apple-mask displacement in this view. Inputs,
+  threshold sensitivity and limitations are recorded in
+  `artifacts/open_rail/g1_rgbd_edge_alignment_20261111/`.
 - On 2026-11-11 a single read-only Open-RAIL capture at
   `artifacts/open_rail/live_readonly_20261111_GLY9dK/` received RGB, raw Z16
   and state. The frame shows a red apple to the right of a pink dish. Its RGB

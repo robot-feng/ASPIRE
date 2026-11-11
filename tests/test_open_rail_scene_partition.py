@@ -356,7 +356,8 @@ def test_preserved_partition_skips_all_geometric_carves(monkeypatch, attached):
     monkeypatch.setattr(service, "_drop_distant_points", lambda *_: pytest.fail("background was filtered"))
     monkeypatch.setattr(service, "_carve_robot_points", lambda *_: pytest.fail("background was carved"))
     captured = []
-    monkeypatch.setattr(service, "_voxelized_scene_mesh", lambda received, **_: captured.append(received.copy()))
+    monkeypatch.setattr(service, "_voxelized_scene_mesh", lambda *_args, **_kw: pytest.fail("used legacy mesh"))
+    monkeypatch.setattr(service, "_sparse_voxelized_scene_mesh", lambda received, **_: captured.append(received.copy()))
     service._scene(request, object())
     np.testing.assert_array_equal(captured[0], points)
     diagnostics = service._scene_partition_diagnostics(request)
@@ -371,15 +372,15 @@ def test_preserved_partition_skips_all_geometric_carves(monkeypatch, attached):
     import hashlib
     payload["target_scene_partition"] = {**proof, "scene_points_sha256": hashlib.sha256(too_far.tobytes()).hexdigest()}
     far_request = service.BaseRequest.model_validate(payload)
-    with pytest.raises(service.HTTPException, match="supported range"):
-        service._scene(far_request, object())
+    service._scene(far_request, object())
+    np.testing.assert_array_equal(captured[-1], too_far)
     huge_grid = points.copy()
     huge_grid[0] = [2.0, 2.0, 2.0]
     payload["scene_points_base64"] = encode_numpy(huge_grid)
     payload["voxel_size_m"] = 0.001
     payload["target_scene_partition"] = {**proof, "scene_points_sha256": hashlib.sha256(huge_grid.tobytes()).hexdigest()}
-    with pytest.raises(service.HTTPException, match="voxel grid"):
-        service._scene(service.BaseRequest.model_validate(payload), object())
+    service._scene(service.BaseRequest.model_validate(payload), object())
+    np.testing.assert_array_equal(captured[-1], huge_grid)
     monkeypatch.setattr(service, "_collision_disabled", lambda *_: True)
     with pytest.raises(service.HTTPException, match="requires collision checking"):
         service._scene(request, object())
