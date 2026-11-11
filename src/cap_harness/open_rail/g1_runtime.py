@@ -175,6 +175,7 @@ class OpenRailG1ObservationRuntime:
         ):
             raise ValueError("maximum_rgb_depth_skew_ms must be positive")
         self._closed = False
+        self._close_complete = False
         self._snapshot_read_lock = threading.Lock()
         self._snapshot_owner: threading.Thread | None = None
         self._proxy = proxy or self._create_proxy()
@@ -588,20 +589,26 @@ class OpenRailG1ObservationRuntime:
         try:
             if self._snapshot_owner is not None:
                 raise OpenRailG1ObservationError("close the G1 snapshot broadcaster first")
-            if self._closed:
+            if self._close_complete:
                 return
             self._closed = True
+            try:
+                stop_observe = getattr(self._proxy, "stop_observe", None)
+                if callable(stop_observe):
+                    try:
+                        stop_observe()
+                    except Exception:
+                        # Still send the worker stop command if observation has
+                        # already stopped or its read loop failed.
+                        pass
+            finally:
+                # Ctrl-C during stop_observe must not skip worker cleanup. If
+                # close raises, permit an explicit retry; an upstream proxy may
+                # nevertheless have marked itself closed before finishing.
+                self._proxy.close()
+                self._close_complete = True
         finally:
             self._snapshot_read_lock.release()
-        stop_observe = getattr(self._proxy, "stop_observe", None)
-        if callable(stop_observe):
-            try:
-                stop_observe()
-            except Exception:
-                # Closing still sends the worker stop command if observation was
-                # already stopped or its read loop has failed.
-                pass
-        self._proxy.close()
 
     def __enter__(self) -> OpenRailG1ObservationRuntime:
         return self

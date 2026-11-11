@@ -26,6 +26,43 @@ class _Proxy:
         pass
 
 
+def test_interrupt_pausing_observation_still_closes_proxy(tmp_path):
+    events = []
+
+    class Proxy:
+        def stop_observe(self):
+            events.append("stop")
+            raise KeyboardInterrupt()
+
+        def close(self):
+            events.append("close")
+
+    runtime = OpenRailG1ObservationRuntime(open_rail_root=tmp_path, proxy=Proxy())
+    with pytest.raises(KeyboardInterrupt):
+        runtime.close()
+    runtime.close()
+    assert events == ["stop", "close"]
+
+
+def test_failed_proxy_close_can_be_retried_without_reopening_reads(tmp_path):
+    events = []
+
+    class Proxy:
+        def close(self):
+            events.append("close")
+            if len(events) == 1:
+                raise RuntimeError("synthetic close failure")
+
+    runtime = OpenRailG1ObservationRuntime(open_rail_root=tmp_path, proxy=Proxy())
+    with pytest.raises(RuntimeError, match="synthetic close failure"):
+        runtime.close()
+    with pytest.raises(OpenRailG1ObservationError, match="closed"):
+        runtime.read_snapshot()
+    runtime.close()
+    runtime.close()
+    assert events == ["close", "close"]
+
+
 class _CommandFeedback:
     def __init__(self, *, reached: bool) -> None:
         self.reached = reached

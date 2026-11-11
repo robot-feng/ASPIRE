@@ -265,6 +265,11 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
 
 - The local CAP MCP tool graph is not available in this session, so no registered
   robot observation or control command can be issued here.
+- The G1 observation runtime now attempts proxy cleanup even if pausing the
+  stream is interrupted, and permits an explicit close retry after a proxy
+  close error while refusing new reads. Fake-proxy and broadcaster tests pass;
+  the underlying SDK queue and native close are not known to have a bounded
+  shutdown time, and real hardware cleanup has not been revalidated.
 - The Open-RAIL G1 driver has historical physical-control evidence: the local
   `/data/open-rail/docs/guides/agibot-g1-full20k-startup.zh-CN.md` records a
   5.01-second Control run followed by Pause and a 10-second observation in
