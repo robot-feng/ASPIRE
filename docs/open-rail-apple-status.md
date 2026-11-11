@@ -204,6 +204,15 @@ the first AgiBot G1 apple grasp integration.
   mapping and time to the same verified observation and managing model caches.
   Source, failed first harness and results are in
   `artifacts/open_rail/g1_locked_arm_offline_20261111_8RBPmW/`.
+- For one of those pregrasp candidates, an offline comparison inserted two
+  Cartesian position/SLERP orientation waypoints while retaining the same
+  observed scene and locked inactive arm. All three segments returned model
+  previews, but the final segment alone still changed one joint by about 2.93
+  rad; the single-segment reference changed it by about 2.91 rad. Segmentation
+  alone therefore did not resolve the large joint motion in this example.
+  The candidate, robot model and tabletop clearance remain unverified and no
+  trajectory was sent. Results and assumptions are in
+  `artifacts/open_rail/g1_cartesian_waypoint_diagnostic_20261111/`.
 - `examples/open_rail/pick_apple.py` now localizes both `apple` and `plate` from
   the same captured `Observation`. The two text-prompted WeVisOne calls are
   sequential, but both consume the exact same RGB-D and robot-state snapshot;
