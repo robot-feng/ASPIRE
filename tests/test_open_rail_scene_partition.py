@@ -1,4 +1,5 @@
 from dataclasses import replace
+import hashlib
 from types import SimpleNamespace
 
 import numpy as np
@@ -44,6 +45,7 @@ def _fixture():
         diagnostics={"snapshot_id": "optical@1.000000000", "camera_name": "head",
                      "segmentation_source": "provider", "instance_count": 1,
                      "robot_state_timestamp_s": 1.0,
+                     "target_mask_sha256": hashlib.sha256(mask.tobytes()).hexdigest(),
                      "snapshot_fingerprint": snapshot_fingerprint(camera, state)},
     )
     return observation, localization
@@ -123,7 +125,12 @@ def test_scene_fingerprint_changes_when_target_mask_changes():
     mask[1, 2] = True
     segment = replace(localization.segmentation, mask=mask)
     points = mask_to_point_cloud(observation.cameras["head"], segment, target_frame="base")
-    revised = _partition(observation, replace(localization, segmentation=segment, point_cloud=points))
+    with pytest.raises(ValueError, match="differs from the source localization"):
+        _partition(observation, replace(localization, segmentation=segment, point_cloud=points))
+    revised = _partition(observation, replace(
+        localization, segmentation=segment, point_cloud=points,
+        diagnostics={**localization.diagnostics, "target_mask_sha256": hashlib.sha256(mask.tobytes()).hexdigest()},
+    ))
     assert revised.snapshot_fingerprint == first.snapshot_fingerprint
     assert revised.scene_fingerprint != first.scene_fingerprint
 
@@ -137,7 +144,10 @@ def test_rejects_unsynchronized_views_or_empty_obstacle_scene():
     full = replace(localization.segmentation, mask=np.ones((3, 3), dtype=bool))
     full_cloud = mask_to_point_cloud(camera, full, target_frame="base")
     with pytest.raises(ValueError, match="no pixels"):
-        _partition(observation, replace(localization, segmentation=full, point_cloud=full_cloud))
+        _partition(observation, replace(
+            localization, segmentation=full, point_cloud=full_cloud,
+            diagnostics={**localization.diagnostics, "target_mask_sha256": hashlib.sha256(full.mask.tobytes()).hexdigest()},
+        ))
 
 
 def _attachment():

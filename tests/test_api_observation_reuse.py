@@ -211,6 +211,43 @@ def test_perception_and_grasp_reuse_the_supplied_observation() -> None:
     assert grasps.diagnostics["camera_timestamp_s"] == 12.0
     assert grasps.diagnostics["observation_timestamp_s"] == 12.0
     assert grasps.diagnostics["snapshot_id"] == localized.diagnostics["snapshot_id"]
+    assert grasps.diagnostics["target_mask_sha256"] == localized.diagnostics["target_mask_sha256"]
+    assert grasps.diagnostics["snapshot_fingerprint"] == localized.diagnostics["snapshot_fingerprint"]
+
+
+def test_grasp_rejects_localization_with_changed_target_mask_or_cloud() -> None:
+    observation = _observation()
+    grasping = _GraspProvider()
+    api = CapApi(
+        _Adapter(observation),  # type: ignore[arg-type]
+        segmentation_provider=_SegmentationProvider(),
+        grasp_providers={"graspgenx": grasping},
+        default_camera="head",
+    )
+    api.estimate_geometry = lambda cloud: ObjectGeometry(  # type: ignore[method-assign]
+        pose=_pose(cloud.points.mean(axis=0), frame=cloud.frame),
+        extents=np.full(3, 0.1),
+        point_count=len(cloud.points),
+    )
+    localized = api.localize_object_from_observation("apple", observation)
+    assert localized.ok
+    different_mask = replace(localized.segmentation, mask=np.array([[False, True], [False, False]]))
+    different_cloud = PointCloud(localized.point_cloud.points + 0.1, localized.point_cloud.frame)
+    different_target = api._project_mask(
+        different_mask, camera_name="head", target_frame="base", observation=observation
+    )
+    for changed in (
+        replace(localized, segmentation=different_mask),
+        replace(localized, point_cloud=different_cloud),
+        replace(localized, segmentation=different_mask, point_cloud=different_target),
+        replace(localized, diagnostics={key: value for key, value in localized.diagnostics.items()
+                                       if key != "target_mask_sha256"}),
+    ):
+        result = api.generate_grasps_for_localization(
+            changed, observation, max_camera_state_skew_s=0.05
+        )
+        assert not result.ok and result.error.details["reason"] == "target_mismatch"
+    assert grasping.point_cloud is None
 
 
 def test_grasp_rejects_changed_rgbd_or_state_even_with_the_same_timestamps() -> None:

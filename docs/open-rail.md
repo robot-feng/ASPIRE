@@ -48,13 +48,29 @@ and control period. Service URLs can be supplied independently. The adapter
 must be read-only and scoped to the right arm; the caller closes it and
 finalizes the recorder. No model service or policy process is started by this
 function. The inputs are not proof of physical calibration.
+
+The same runner can optionally preview pregrasp, approach and lift for the
+task's generated candidates. Set `preview_full_chain=True` and an explicit
+positive `preview_scene_voxel_size_m` in the task metadata, and provide both
+`chain_lift_offset_m` in the robot base frame and `chain_attachment` as an
+`AttachedObjectGeometry` to the runner. The runner checks that the target
+partition and grasp set use the same snapshot and mask. It tries candidates in
+order, recording each planner response, and stops at the first complete chain.
+The attachment and lift are assumptions: this preview does not execute motion,
+verify contact, or establish that any trajectory is safe. G1 camera, TCP,
+gripper, attachment and planner inputs remain subject to real verification.
 `G1ObservationControl` connects a caller-owned read-only G1 runtime to the
 adapter, converting the camera and both arms from the same raw snapshot. It
 requires verified calibration, a verified common-clock reference and explicit
 freshness limits; its command methods always refuse motion. The physical G1
-calibration is not yet available, and the motion-enabled control facade,
-contact, lift, holding verification and complete execution launcher remain to
-be integrated.
+calibration is not yet available. An experimental `G1ControlFacade` combines
+the observation source with right-arm timed dispatch and measured feedback.
+It requires a verified fresh-scene guard, independent base/head/waist checks,
+bounded transport, and an in-flight monitor; no verified hardware transport or
+monitor is supplied, so the existing G1 proxy cannot dispatch through it.
+Stopping later waypoint dispatch does not cancel a waypoint already sent.
+Contact, lift, holding verification and a complete execution launcher remain
+to be integrated and verified on hardware.
 When candidate generation succeeds, the recorder also writes
 `media/grasp-candidates.ply` with the observed scene, framed candidate axes,
 and approach directions. It is a visualization, not a collision or reachability

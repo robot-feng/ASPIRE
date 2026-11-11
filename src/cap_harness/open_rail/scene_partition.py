@@ -86,6 +86,8 @@ def partition_target_scene(
         raise ValueError("target mask does not match the selected camera")
     if mask.mask.shape != camera.depth_m.shape:
         raise ValueError("target mask shape does not match the selected camera")
+    if info.get("target_mask_sha256") != hashlib.sha256(mask.mask.tobytes()).hexdigest():
+        raise ValueError("target mask differs from the source localization")
     if any(
         view.timestamp_s is None or abs(view.timestamp_s - state.timestamp_s) > max_skew
         for view in observation.cameras.values()

@@ -121,6 +121,14 @@ def test_read_only_control_supplies_one_bound_snapshot_to_adapter():
     assert runtime.closed
 
 
+def test_guard_input_uses_the_exact_same_validated_snapshot_without_a_second_read():
+    runtime = _Runtime()
+    observation, snapshot = _control(runtime).get_observation_with_snapshot()
+    assert snapshot is runtime.snapshot and runtime.reads == 1
+    assert observation.cameras["head"].timestamp_s == snapshot.rgb_timestamp_ns / 1e9
+    np.testing.assert_array_equal(observation.robot_state.joint_positions["right"], snapshot.state[7:14])
+
+
 def test_read_only_control_passes_explicit_rectification_without_mutating_snapshot():
     runtime = _Runtime()
     rectification = G1RgbdRectification(

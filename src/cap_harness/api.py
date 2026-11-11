@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+import hashlib
 from typing import Any
 
 import numpy as np
@@ -553,13 +554,45 @@ class CapApi:
                     details={"reason": "camera_state_skew"},
                 ),
             )
-        return self.generate_grasps_from_observation(
+        mask_digest = None
+        if observation.robot_state.embodiment.startswith("open_rail_"):
+            mask_digest = hashlib.sha256(localization.segmentation.mask.tobytes()).hexdigest()
+            try:
+                projected = self._project_mask(
+                    localization.segmentation,
+                    camera_name=name,
+                    target_frame=observation.robot_state.base_frame,
+                    observation=observation,
+                )
+            except ValueError:
+                projected = None
+            if (
+                localization.diagnostics.get("target_mask_sha256") != mask_digest
+                or projected is None
+                or not np.array_equal(projected.points, localization.point_cloud.points)
+            ):
+                return GraspSet(
+                    ok=False,
+                    error=ApiError(
+                        ErrorCode.INVALID_REQUEST,
+                        "localization mask and point cloud do not match the original target",
+                        details={"reason": "target_mismatch"},
+                    ),
+                )
+        result = self.generate_grasps_from_observation(
             name,
             localization.segmentation,
             observation,
             backend=backend,
             max_candidates=max_candidates,
         )
+        if mask_digest is not None:
+            result = replace(result, diagnostics={
+                **result.diagnostics,
+                "target_mask_sha256": mask_digest,
+                "snapshot_fingerprint": localization.diagnostics["snapshot_fingerprint"],
+            })
+        return result
 
     def _resolve_arm(self, arm: str) -> str:
         """An embodiment's own name for the arm the caller asked for.
@@ -1636,6 +1669,9 @@ class CapApi:
             diagnostics["snapshot_fingerprint"] = snapshot_fingerprint(
                 observation.cameras[name], observation.robot_state
             )
+            diagnostics["target_mask_sha256"] = hashlib.sha256(
+                segmentation.mask.tobytes()
+            ).hexdigest()
         return LocalizationResult(
             ok=True,
             geometry=geometry,

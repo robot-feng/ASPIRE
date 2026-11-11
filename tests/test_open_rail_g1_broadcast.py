@@ -143,10 +143,10 @@ def test_feedback_timeout_is_independent_of_a_stalled_capture_and_latches(tmp_pa
         def __init__(self):
             self.calls = []
 
-        def set_joint_position_control(self, lifetime_s, groups):
+        def set_joint_position_control_bounded(self, lifetime_s, groups, *, timeout_s):
             self.calls.append((lifetime_s, groups))
 
-        def publish_right_gripper(self, value):
+        def publish_right_gripper_bounded(self, value, *, timeout_s):
             raise AssertionError("uncertain command must prevent another dispatch")
 
     proxy = StalledProxy()
@@ -233,7 +233,7 @@ def test_ipc_frames_feed_observation_and_terminal_feedback_without_rpc(tmp_path,
     monkeypatch.setattr(broker._condition, "wait", signal_wait)
 
     class Transport:
-        def set_joint_position_control(self, lifetime_s, groups):
+        def set_joint_position_control_bounded(self, lifetime_s, groups, *, timeout_s):
             assert groups == {"right_arm": (0.0,) * 7}
             start.set()
 
@@ -287,7 +287,7 @@ def test_short_gripper_travel_does_not_prove_grasp_or_failure(tmp_path):
     broker.start()
 
     class Transport:
-        def publish_right_gripper(self, value):
+        def publish_right_gripper_bounded(self, value, *, timeout_s):
             assert value == 1.0
             start.set()
 

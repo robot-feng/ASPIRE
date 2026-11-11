@@ -1,6 +1,6 @@
 # Open-RAIL apple grasp implementation status
 
-Updated 2026-11-10 (Asia/Shanghai). This file is the current evidence index for
+Updated 2026-11-11 (Asia/Shanghai). This file is the current evidence index for
 the first AgiBot G1 apple grasp integration.
 
 ## Current RGB-D calibration status
@@ -150,6 +150,58 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   `/data/parameters/head_extrinsic_params.json`. Their association to the current
   RGB/depth stream, frame convention, and transform direction have not yet been
   verified. These files are not treated as a calibrated ASPIRE profile.
+- The local historical `/data/calib/head_d457/` record contains 12 original
+  images, 15 poses, the board geometry, and an `eyeinhand` result. Its RGB
+  intrinsic file identifies D457 serial `343622300358`, the same serial listed
+  for `head_color` and `head_depth` in the local camera configuration; this is
+  a configuration match, not a live device identity check. Its extrinsic JSON
+  matches `/data/parameters/head_extrinsic_params.json` byte for byte.
+  Re-detecting the ChArUco board in those 12 images and using the saved RGB
+  intrinsics and distortion gives a fixed-board consistency check: under the
+  unverified assumptions that numbered images correspond to the same pose
+  indices, the board stayed fixed, and its recorded dimensions are accurate,
+  saved-pose × extrinsic × camera-to-board has 1.07 mm median and 1.54 mm maximum
+  positional deviation from the coordinate-wise median; replacing the extrinsic
+  by its inverse gives 38.7 mm and 64.7 mm respectively. The same data were
+  used for calibration, so this is an internal consistency check, not a held-out
+  estimate of physical calibration accuracy.
+- Comparing the same 15 saved poses with the installed `a2d_v01` URDF gives a
+  candidate frame interpretation: the model's `base_link` to `head_pitch_link`
+  transform, followed by a 180-degree rotation about the link's local Z, matches
+  the first saved pose at zero joint values within 0.00242 mm and 0.00052°.
+  Fitting hypothetical joint values to each of the 15 saved poses gives maximum
+  residuals of 0.00250 mm and 0.00040°. These numerical residuals compare a
+  saved pose with a model; the fitted angles are not measured historical joint
+  positions. Taken together, the checks support using the JSON in the forward
+  direction from that *candidate* rotated head frame to RGB optical frame.
+  They do not establish that the installed model, camera mounting, pose source,
+  current device identity or RGB-D registration still matches the historical
+  calibration. No value is enabled for live robot control. Source hashes,
+  assumptions, all pose comparisons and the offline reproduction script are
+  in `artifacts/open_rail/vendor_head_handeye_audit_20261111/`.
+- A further check applied that **candidate** model and head-camera transform to
+  the historical saved apple frame. Its raw 20-value vector includes the
+  source-labelled head yaw/pitch and waist pitch/lift entries; the recorded head
+  and waist messages are approximately 13.50 ms later than RGB, without an
+  established clock domain or acceptable skew. This is not a verified dynamic
+  state mapping. Under the additional unverified assumptions that the published
+  depth is RGB-registered RGB axial Z at 0.001 m per raw count and that the
+  vendor RGB distortion model applies, a rectangular region selected by visual
+  inspection on the saved tabletop fits a plane tilted approximately 0.77° from
+  candidate base Z. On a fixed random sample of 5,000 nonzero ROI points, all
+  lie within 10 mm of that fitted plane. The median WeVisOne apple-mask point
+  lies approximately 64.8 mm above it. This shows no obvious geometric conflict
+  in that one view, but the selected ROI, common assumptions and lack of an
+  independent tabletop measurement make it unsuitable for certifying any
+  calibration, reachability or collision clearance. The source hashes, exact
+  ROI, assumptions and script are in
+  `artifacts/open_rail/vendor_head_apple_scene_audit_20261111/`.
+- The historical factory file for `cam7` specifies depth intrinsics at
+  1280×720, while this published raw Z16 frame is 1280×800, matching the RGB
+  frame's dimensions. An intermediate conversion, resizing or registration
+  might explain this discrepancy, but these records do not establish which, or
+  that RGB and depth pixels are aligned. The depth scale and frame semantics
+  remain unverified.
 - The prior read-only capture is preserved at
   `artifacts/open_rail/observe/snapshot.json`, alongside its RGB image and state
   vector. It contains 1280×800 RGB and 20 state values, but no depth packet and
@@ -290,11 +342,13 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
 
 - Open-RAIL adapter, shared API, runtime and provider contract checks pass with
   fakes; these do not establish real model inference or robot behavior.
-- A separate three-stage planning helper chains pregrasp, approach and lift
-  against one saved scene and the preceding predicted joint endpoint. Tests use
-  a simulated planner response; neither contact nor the attached apple is
-  observed, and the results are explicitly non-executable. This helper is not
-  yet connected to the apple task runner or a real G1 planning service.
+- The apple preview runner can optionally chain pregrasp, approach and lift
+  against one scene and the preceding predicted joint endpoint. It checks the
+  localization, grasp set and partition against the same snapshot and target
+  mask, and requires an explicit hypothetical attachment and lift offset. Tests
+  use simulated service responses; neither contact nor the attached apple is
+  observed, the results are non-executable, and this chain has not been run
+  through a real G1 planning service.
 - The original YAM simulator adapter and motion-interlock tests passed 32 cases
   in an isolated aarch64 test environment with MuJoCo 3.3.0 and mink 0.0.13.
   No physical YAM was connected.

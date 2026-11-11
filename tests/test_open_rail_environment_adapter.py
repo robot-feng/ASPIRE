@@ -187,7 +187,7 @@ def test_cap_open_close_reach_native_g1_endpoint_through_explicit_bridge() -> No
         def __init__(self):
             self.targets = []
 
-        def publish_right_gripper(self, position):
+        def publish_right_gripper_bounded(self, position, *, timeout_s):
             self.targets.append(position)
 
     class Feedback:

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 import requests
+from test_open_rail_scene_partition import _attachment
 
+from cap_harness.api import CapApi
 from cap_harness.artifacts import RunRecorder
 from cap_harness.contracts import CameraObservation, Observation, Pose, RobotState, TaskContext
 from cap_harness.open_rail import OpenRailAdapter, OpenRailProfile
 from cap_harness.open_rail.runner import run_apple_preview
+from cap_harness.providers.curobo import service
 from cap_harness.providers.wire import encode_numpy
-
 
 PROGRAM = Path(__file__).resolve().parents[1] / "examples/open_rail/pick_apple.py"
 DEPTH_FILTER = {
@@ -174,3 +177,92 @@ def test_preview_rejects_motion_enabled_adapter_before_reading(tmp_path):
     assert control.commands == []
     recorder.finalize(program_ok=False, task_success=False, termination_reason="program_error",
                       program_result=None)
+
+
+def test_chain_preview_requires_explicit_attachment_before_observation(tmp_path):
+    control = _Control()
+    config = dict(control.context.metadata["open_rail_pick_apple"], preview_full_chain=True,
+                  preview_scene_voxel_size_m=0.01)
+    control.context = replace(control.context, metadata={"open_rail_pick_apple": config})
+    adapter = OpenRailAdapter(control, control.profile, task_context=control.context, controlled_arms=("right",))
+    recorder = _recorder(tmp_path)
+    with pytest.raises(ValueError, match="attachment"):
+        run_apple_preview(adapter, program_path=PROGRAM, recorder=recorder,
+                          depth_filter=DEPTH_FILTER, gripper_sweep=SWEEP,
+                          gripper_base_to_tcp=np.eye(4), control_period_s=0.05,
+                          chain_lift_offset_m=[0, 0, 0.1])
+    assert control.commands == []
+    recorder.finalize(program_ok=False, task_success=False, termination_reason="program_error", program_result=None)
+
+
+@pytest.mark.parametrize("tampered_field", [None, "target_mask_sha256", "snapshot_fingerprint"])
+def test_optional_chain_uses_same_mask_snapshot_and_never_commands_robot(monkeypatch, tmp_path, tampered_field):
+    calls = []
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    def request(_session, method, url, **kwargs):
+        payload = kwargs.get("json")
+        calls.append((url, payload))
+        if ":8117/" in url:
+            mask = np.zeros((8, 10), dtype="<f4")
+            mask[1:7, 1:9] = 1
+            return Response({"results": [{"label": "apple", "box_xyxy": [1, 1, 9, 7],
+                             "shape": [8, 10], "probabilities_base64": base64.b64encode(mask.tobytes()).decode()}],
+                             "total_instances": 1, "truncated": False})
+        if ":8120/" in url:
+            return Response({"grasps_base64": encode_numpy(np.eye(4)[None]),
+                             "scores_base64": encode_numpy(np.array([0.8])), "branch_tags": [], "timing": {}})
+        if ":8118/" in url:
+            req = service.PlanRequest.model_validate(payload)
+            start = np.asarray(payload["joint_positions"]["right"])
+            return Response({"joint_positions_base64": encode_numpy(np.stack((start, start + 0.01))),
+                             "dt_s": 0.1, "attachment_diagnostics": service._attachment_diagnostics(req),
+                             "scene_partition_diagnostics": service._scene_partition_diagnostics(req),
+                             "collision_diagnostics": {"collision_disabled": False, "scene_supplied": True,
+                                 "world_collision_check_enabled": True, "self_collision_check_enabled": True,
+                                 "robot_model_verified": False}})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(requests.Session, "request", request)
+    if tampered_field:
+        generate = CapApi.generate_grasps_for_localization
+
+        def tamper_mask(self, localization, *args, **kwargs):
+            result = generate(self, localization, *args, **kwargs)
+            return replace(result, diagnostics={**result.diagnostics, tampered_field: "wrong"})
+
+        monkeypatch.setattr(CapApi, "generate_grasps_for_localization", tamper_mask)
+    control = _Control()
+    config = dict(control.context.metadata["open_rail_pick_apple"], preview_full_chain=True,
+                  preview_scene_voxel_size_m=0.01)
+    control.context = replace(control.context, metadata={"open_rail_pick_apple": config})
+    adapter = OpenRailAdapter(control, control.profile, task_context=control.context, controlled_arms=("right",))
+    recorder = _recorder(tmp_path)
+    kwargs = dict(program_path=PROGRAM, recorder=recorder, depth_filter=DEPTH_FILTER,
+                  gripper_sweep=SWEEP, gripper_base_to_tcp=np.eye(4), control_period_s=0.05,
+                  chain_lift_offset_m=[0, 0, 0.1], chain_attachment=_attachment())
+    if tampered_field:
+        with pytest.raises(ValueError, match="target mask and snapshot"):
+            run_apple_preview(adapter, **kwargs)
+        assert not any(":8118/" in url for url, _ in calls)
+    else:
+        result = run_apple_preview(adapter, **kwargs)
+        assert result.ok and result.result["ok"] is False and result.result["stage"] == "chain_preview"
+        chain, = result.result["chain_attempts"]
+        assert chain.completed and all(not stage.diagnostics["collision_aware"] for stage in chain.stages)
+        plans = [payload for url, payload in calls if ":8118/" in url]
+        assert len(plans) == 3
+        assert plans[1]["target_scene_partition"] == plans[2]["target_scene_partition"]
+        assert plans[1]["joint_positions"]["right"] == list(chain.stages[0].waypoints[-1])
+        assert plans[2]["joint_positions"]["right"] == list(chain.stages[1].waypoints[-1])
+    assert control.commands == []
+    recorder.finalize(program_ok=True, task_success=False, termination_reason="program_completed", program_result=None)

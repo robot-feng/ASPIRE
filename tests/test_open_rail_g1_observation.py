@@ -328,6 +328,17 @@ def test_motion_uncertainty_survives_new_facade_reset_and_close(tmp_path) -> Non
         arm_joint_limits_rad=((-2.0, 2.0),) * 7,
         gripper_tolerance=0.03,
     )
+    # The real proxy RPC is intentionally blocked as unbounded. This local
+    # fake preserves the test's purpose: a lost terminal confirmation must
+    # latch every facade sharing the same proxy session.
+    class FakeTransport:
+        def set_joint_position_control_bounded(self, lifetime, groups, *, timeout_s):
+            proxy.command_right_arm(list(groups["right_arm"]), lifetime)
+
+        def publish_right_gripper_bounded(self, position, *, timeout_s):
+            proxy.command_right_gripper(position)
+
+    first._transport = FakeTransport()
     timed_out = first.set_arm("right", np.zeros(7), lifetime_s=0.1, timeout_s=0.2)
     assert not timed_out.ok and timed_out.error.code is ErrorCode.TIMEOUT
     first.reset()

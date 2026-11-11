@@ -80,17 +80,22 @@ class G1ObservationControl:
         self._closed = False
 
     def get_observation(self) -> Observation:
+        return self.get_observation_with_snapshot()[0]
+
+    def get_observation_with_snapshot(self) -> tuple[Observation, OpenRailSnapshot]:
+        """Return one converted observation and its exact validated raw snapshot.
+
+        The raw state retains head and waist values needed by an execution
+        guard; the standard RobotState contains only arms. No second frame is
+        read. Base pose is not present and needs an independent trusted source.
+        """
         if self._closed:
             raise OpenRailG1ObservationError("G1 observation control is closed")
         snapshot = self._runtime.read_snapshot(require_depth=True)  # type: ignore[attr-defined]
         if not isinstance(snapshot, OpenRailSnapshot) or not snapshot.is_synchronized:
             raise OpenRailG1ObservationError("G1 raw snapshot is missing or not synchronized")
-        now = self._clock_now_ns()
-        if isinstance(now, bool) or not isinstance(now, int) or now <= 0:
-            raise OpenRailG1ObservationError("common-clock reference must be a positive integer")
+        now = self._snapshot_reference_time(snapshot, check_side_feedback=False)
         timestamps = (snapshot.rgb_timestamp_ns, snapshot.depth_timestamp_ns, *snapshot.state_timestamps_ns.values())
-        if any(stamp is None or stamp > now or now - stamp > self._max_age_ns for stamp in timestamps):
-            raise OpenRailG1ObservationError("G1 snapshot is stale or from the future")
         skew_ms = self._camera_calibration.maximum_snapshot_skew_ms
         if isinstance(skew_ms, bool) or not isinstance(skew_ms, (float, int)) or not math.isfinite(skew_ms) or skew_ms < 0:
             raise OpenRailG1ObservationError("camera synchronization threshold must be finite and nonnegative")
@@ -104,12 +109,35 @@ class G1ObservationControl:
             snapshot, self._camera_calibration, head_kinematics=self._head_kinematics,
             rectification=self._rectification,
         )
-        return Observation(
+        observation = Observation(
             cameras={self._camera_calibration.public_camera_key: camera},
             robot_state=state,
             task_context=self._task_context,
             timestamp_s=camera.timestamp_s,
         )
+        return observation, snapshot
+
+    def ensure_snapshot_current(self, snapshot: OpenRailSnapshot) -> int:
+        """Reject snapshots which age out while a scene guard is running."""
+        return self._snapshot_reference_time(snapshot, check_side_feedback=True)
+
+    def _snapshot_reference_time(self, snapshot: OpenRailSnapshot, *, check_side_feedback: bool) -> int:
+        if self._closed or not isinstance(snapshot, OpenRailSnapshot) or not snapshot.is_synchronized:
+            raise OpenRailG1ObservationError("G1 raw snapshot is missing or not synchronized")
+        now = self._clock_now_ns()
+        if isinstance(now, bool) or not isinstance(now, int) or now <= 0:
+            raise OpenRailG1ObservationError("common-clock reference must be a positive integer")
+        timestamps = (snapshot.rgb_timestamp_ns, snapshot.depth_timestamp_ns, *snapshot.state_timestamps_ns.values())
+        if any(stamp is None or stamp > now or now - stamp > self._max_age_ns for stamp in timestamps):
+            raise OpenRailG1ObservationError("G1 snapshot is stale or from the future")
+        if check_side_feedback and self._side_feedback is not None:
+            # Re-run the strict per-side timing and mapping validation because
+            # those source timestamps are distinct from the combined arm one.
+            robot_state_from_snapshot(
+                snapshot, self._profile, self._state_kinematics,
+                side_feedback=self._side_feedback, reference_timestamp_ns=now,
+            )
+        return now
 
     def get_robot_state(self):
         return self.get_observation().robot_state

@@ -87,6 +87,36 @@ def plan_apple_pregrasp():
     if grasps.diagnostics.get("tcp_transform_applied") is not True:
         return {"ok": False, "stage": "grasp_generation", "reason": "TCP transform unavailable"}
 
+    # The runner can optionally request a non-executable three-stage preview.
+    # Keep the exact observation and localization together for its scene proof.
+    if config.get("preview_full_chain") is True:
+        try:
+            voxel_size = float(config["preview_scene_voxel_size_m"])
+            if not 0.0 < voxel_size < float("inf"):
+                raise ValueError("invalid preview scene voxel size")
+            partition = partition_target_scene(
+                observation, localization, camera_name=camera_name,
+                max_camera_state_skew_s=maximum_skew, voxel_size_m=voxel_size,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "stage": "scene_partition", "reason": str(exc)}
+        candidates = []
+        failures = []
+        for candidate in grasps.grasps:
+            try:
+                pose = pregrasp_pose(candidate, distance, observation.robot_state.base_frame)
+            except (TypeError, ValueError) as exc:
+                failures.append(str(exc))
+                continue
+            candidates.append((candidate, pose))
+        if not candidates:
+            return {"ok": False, "stage": "pregrasp_planning", "failures": failures}
+        return {
+            "ok": False, "stage": "chain_preview_input", "snapshot_id": partition.snapshot_id,
+            "partition": partition, "candidates": candidates, "preview_grasps": grasps,
+            "preview_scene": get_planning_scene(observation),
+        }
+
     # The full observed scene is kept for pregrasp planning, including apple
     # and table. Contact and held-object planning are separate future stages.
     scene = get_planning_scene(observation)

@@ -133,10 +133,10 @@ def test_command_runtime_requires_measured_feedback_and_latches_invalid_samples(
         def __init__(self):
             self.calls = []
 
-        def set_joint_position_control(self, lifetime_s, groups):
+        def set_joint_position_control_bounded(self, lifetime_s, groups, *, timeout_s):
             self.calls.append((lifetime_s, groups))
 
-        def publish_right_gripper(self, position):
+        def publish_right_gripper_bounded(self, position, *, timeout_s):
             raise AssertionError("uncertain session must reject later commands")
 
     transport = Transport()
@@ -161,7 +161,7 @@ def test_command_runtime_requires_measured_feedback_and_latches_invalid_samples(
 
 def test_command_runtime_returns_terminal_measurement_evidence():
     class Transport:
-        def set_joint_position_control(self, lifetime_s, groups):
+        def set_joint_position_control_bounded(self, lifetime_s, groups, *, timeout_s):
             assert set(groups) == {"right_arm"}
 
     samples = _ScriptedSamples([_arm(t) for t in (1_050_000_000, 1_100_000_000, 1_150_000_000)])

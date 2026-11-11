@@ -27,6 +27,14 @@ class _Transport:
     def publish_right_gripper(self, position) -> None:
         self.calls.append(("gripper", position))
 
+    def set_joint_position_control_bounded(self, lifetime_s, joint_groups, *, timeout_s):
+        assert timeout_s > 0
+        self.set_joint_position_control(lifetime_s, joint_groups)
+
+    def publish_right_gripper_bounded(self, position, *, timeout_s):
+        assert timeout_s > 0
+        self.publish_right_gripper(position)
+
 
 def test_concurrent_facades_share_one_proxy_latch() -> None:
     class SlowProxy:
