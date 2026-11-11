@@ -35,10 +35,10 @@ they reach the Open-RAIL runtime.
 
 `examples/open_rail/pick_apple.py` is a CAP program for the first planning
 stage. Given an Open-RAIL CAP registry and explicit `open_rail_pick_apple` task
-metadata, it reuses one observation for single-apple localization, GraspGen-X
-and full-scene pregrasp planning. It returns a preview only when the returned
-trajectory is marked collision-aware, and always reports the full grasp task as
-incomplete. It sends no gripper or arm commands.
+metadata, it reuses one observation to localize one apple and one plate, then
+uses GraspGen-X and full-scene pregrasp planning for the apple. It returns a
+preview only when the returned trajectory is marked collision-aware, and always
+reports the full grasp task as incomplete. It sends no gripper or arm commands.
 
 `cap_harness.open_rail.runner.run_apple_preview` composes that program with
 WeVisOne, depth-mask refinement, GraspGen-X, cuRobo and the normal CAP runner

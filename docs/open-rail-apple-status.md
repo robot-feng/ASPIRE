@@ -146,6 +146,17 @@ the first AgiBot G1 apple grasp integration.
   registration are still unverified, and the associated robot-state timestamps
   are not bound to the state values. This demonstrates paired image-space
   detection only, not a calibrated apple-to-plate transform or placement plan.
+- A later read-only capture at 16:37 CST on 2026-11-11 is saved under
+  `artifacts/open_rail/g1_live_scene_20261111_JAWQ2g/`. In that frame WeVisOne-VL
+  found one apple mask (5,980 pixels) and one plate mask (18,332 pixels).
+  A GraspGen-X replay used 5,627 filtered apple-depth pixels and returned eight
+  candidates in `graspgenx_report_UNVERIFIED.json`. The replay assumed candidate
+  RGB intrinsics, RGB-depth registration, a 0.001 m/raw depth unit and a
+  model-only gripper sweep. It did not apply a calibrated TCP transform or check
+  scene collisions. The RGB-depth source timestamps differed by 4.48 ms and the
+  state timestamps were not bound to the values. The capture worker needed forced
+  termination on close. This historical frame and its candidates are not an
+  executable plan or evidence of the current scene.
 
 ## ASPIRE task pattern and waypoint policy
 
@@ -179,6 +190,49 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
 
 - The local CAP MCP tool graph is not available in this session, so no registered
   robot observation or control command can be issued here.
+- The Open-RAIL G1 driver has historical physical-control evidence: the local
+  `/data/open-rail/docs/guides/agibot-g1-full20k-startup.zh-CN.md` records a
+  5.01-second Control run followed by Pause and a 10-second observation in
+  which right-arm peak-to-peak movement was about 0.000244 rad. The same guide
+  also records an operator reporting robot motion. Those prior results establish
+  that the Open-RAIL driver has operated the robot, not the behavior of this
+  integration's right-arm-only commands, terminal feedback or in-flight cancel.
+- The tested upstream G1 `control_robot` path passes the arm array to
+  `RobotDds.move_arm`, which publishes the SDK's arm-joint name list and the
+  supplied positions; its gripper call publishes to both hand endpoints. The
+  ASPIRE single-right-arm path instead uses the SDK's WBC `right_arm` group.
+  The historical full-body Open-RAIL run does not independently establish
+  that separate path's group scoping or stop behavior on this robot.
+- On 2026-11-11, passive ROS graph discovery with `ROS_LOCALHOST_ONLY=0` found
+  `/wbc/joint_position_control` and `/wbc/motion_stop`, each with one publisher
+  and one subscriber; their endpoint node names were unavailable. With
+  `ROS_LOCALHOST_ONLY=1` the same local probe saw neither topic. Listening for
+  eight seconds found no joint-position message. The installed forwarder binary
+  contains `Pb2RosNode` type references for both command types and their topic
+  names, supporting a candidate protobuf-to-ROS path. These are time-limited
+  discovery and static-binary observations, not proof of control ownership,
+  live message delivery, command receipt, or safe stopping. No command was
+  published or service called by this probe. The discovery output and binary
+  hashes are under `artifacts/open_rail/g1_ros_discovery_20261111_S8P9Tg/`.
+- The same graph listed `/wbc/arm_go_pose`. A candidate implementation in the
+  installed `vr_control_py/vr_arm_control.py` ignores the request's `block`
+  field, returns success after starting timed interpolation, and publishes a
+  14-joint arm command even when right arm is selected. A small offline mock
+  of its callback reproduced immediate success for both `block` values and an
+  invalid arm selector. Its running service binding was not established. This
+  service has not been called and cannot establish right-arm-only motion,
+  terminal feedback or cancellation from the available evidence.
+- Three subsequent read-only RGB-D snapshots at about 18:18 CST are retained in
+  `artifacts/open_rail/g1_bound_observe_20261111_8GqEZM/`. All three contain
+  state values bound to their source-message timestamps and raw right-arm and
+  gripper feedback from the same broadcaster. Depth-to-RGB timestamp offsets
+  were +0.76, -6.49 and -16.18 ms; head/waist source offsets reached about
+  -41.90 ms. No maximum acceptable skew or common-clock certification was
+  supplied, so the snapshots remain marked unsynchronized. Across these three
+  observations the largest reported 14-arm joint span was 0.000070 rad; this
+  is a short historical observation, not evidence of current stillness or
+  of gripper measurement freshness. No command was sent; the worker again
+  needed forced termination during close.
 - On 2026-11-11 a single read-only Open-RAIL capture at
   `artifacts/open_rail/live_readonly_20261111_GLY9dK/` received RGB, raw Z16
   and state. The frame shows a red apple to the right of a pink dish. Its RGB
@@ -339,6 +393,16 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   calibration, reachability or collision clearance. The source hashes, exact
   ROI, assumptions and script are in
   `artifacts/open_rail/vendor_head_apple_scene_audit_20261111/`.
+- An additional projection diagnostic used the 18:18 bound-state RGB snapshot,
+  the candidate factory camera chain, and the candidate a2d_v01 robot model.
+  Most known arm meshes were outside the image. Assuming the installed grippers
+  match the official OmniPicker rigid-base model and its flange attachment, the
+  projected bases overlapped manually chosen image rectangles more under the
+  forward factory transform than with its inverse. The rectangles are coarse,
+  occlusion is not modeled and the gripper assumption is unverified, so this
+  helps reject some large frame-direction errors only; it is not a metric
+  camera calibration or TCP measurement. Inputs, overlays and assumptions are
+  in `artifacts/open_rail/g1_rgb_fk_projection_20261111/`.
 - The historical factory file for `cam7` specifies depth intrinsics at
   1280×720, while this published raw Z16 frame is 1280×800, matching the RGB
   frame's dimensions. An intermediate conversion, resizing or registration
