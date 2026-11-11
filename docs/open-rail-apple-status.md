@@ -145,6 +145,29 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
 - `/run/a2d-control-manager/state.json` reports scene `develop` and `active: null`.
   The A2D mode-switch service is running. No StarVLA inference or Open-RAIL robot
   client process was found during the baseline check.
+- A 2026-11-11 offline audit of the installed A2D SDK and Open-RAIL proxy found
+  that `MotionController.set_joint_position_control` creates a right-arm-only
+  `JointPositionControl` with a lifetime and group mask, but does not populate
+  its header. A pure in-memory fake publisher captured an unset protobuf header
+  with zero timestamp before the native DDS publisher; the installed IDL says
+  the timestamp is the send time. Whether the native publisher fills it or the
+  controller enforces expiry remains unverified. The proxy's ordinary RPC
+  timeout limits how long the caller waits; it does not invalidate that RPC
+  queue entry. `pause_controls()` invalidates a separate action queue and does
+  not cancel a queued scoped RPC. No real control connection was created.
+- The scoped gripper publisher supplies only `JointState.position`, with no
+  velocity, effort or current limit in its message. The installed `MotorState`
+  definition exposes position, velocity, effort, current, status and error
+  fields, but its opening/force/stall status labels are explicitly described
+  for dexterous hands, not the installed OmniPicker. Neither its use nor any
+  threshold or hold behavior is verified for this gripper. The `EndState` and
+  `MotionControlStatus` definitions provide no per-command acknowledgement
+  identifier, so a later state sample is not in itself proof that a particular
+  command completed. `EndEmergStop` has no side selector in its service type;
+  `EndControl` has one, but its current server, use and effects have not been
+  established. No cancellation or gripper service was called. The audited
+  paths, SHA-256 hashes and a reproducible in-memory packet probe are indexed at
+  `artifacts/open_rail/g1_control_protocol_audit_20261111/`.
 - G1 RGB camera parameters exist at `/data/parameters/head_intrinsic_params.json`;
   a head extrinsic file also exists at
   `/data/parameters/head_extrinsic_params.json`. Their association to the current
@@ -202,6 +225,29 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   might explain this discrepancy, but these records do not establish which, or
   that RGB and depth pixels are aligned. The depth scale and frame semantics
   remain unverified.
+- Static inspection of the current `develop` configuration shows `cam7` set to
+  1280×720. The observation adapter reads width and height from the published
+  Z16 packet itself and checks its byte length before reshaping; the historical
+  1280×800 array is therefore not caused solely by forcing it to the RGB shape
+  in the adapter. The installed D457 camera library uses the V4L2/CSI path;
+  inspection of the installed publishing function shows a buffer-dump and
+  publish path, but does not rule out processing in the sensor, driver or an
+  earlier stage. The source configuration and binary provenance remain separate
+  from proof of what processing the historical packet underwent. The checked
+  config SHA-256 is `3b4abc1e79e31a6d01d16866bba19909fb4d9dce5132cc9d5e9e5abb2ad25caf`;
+  the publisher library SHA-256 is
+  `ddd7d88f9c7afddd59735d5c63874dc03e0c8a92add681a33888668536d42e2b`.
+- A local registration *diagnostic* compares the saved WeVisOne apple mask to
+  thresholded raw depth in the same historical frame, searching translations
+  within a 100-pixel margin. For raw intervals [570,615), [575,620) and
+  [580,620), the best mask overlap IoU is approximately 0.93 with depth-image
+  offsets (+1,+2), (0,+3) and (0,+3) pixels. These thresholds were chosen after
+  inspecting this target and the comparison is a single object in one frame;
+  the estimated offsets include mask boundary error, background selection and
+  unverified RGB-depth time skew. It is not a metric-scale or full-image
+  registration certificate. Exact inputs, hashes, other tested thresholds and
+  a reproduction script are under
+  `artifacts/open_rail/apple_depth_overlap_alignment_20261111/`.
 - The prior read-only capture is preserved at
   `artifacts/open_rail/observe/snapshot.json`, alongside its RGB image and state
   vector. It contains 1280×800 RGB and 20 state values, but no depth packet and
@@ -269,6 +315,22 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   sample returned five candidates. Its sample gripper descriptor is not the
   G1's, and no scene collision or robot execution was checked. Evidence is in
   `artifacts/open_rail/graspgenx_generic_smoke_20261104/`.
+- On 2026-11-11, a second offline GPU inference used the saved historical
+  apple frame, its saved WeVisOne mask refined to 5,983 candidate depth
+  points, and a sweep descriptor derived from the candidate OmniPicker URDF
+  and meshes. The successful replay returned eight gripper-base poses in the
+  assumed camera frame in 5.58 seconds; no controller TCP transform or scene
+  collision check was applied. The mesh descriptor models two hypothetical
+  static finger configurations, assumes a closed linkage and uses manually
+  chosen margins. Its frame, geometry and linkage are not verified against
+  the installed hardware; the RGB-D scale and registration are also assumed.
+  These are model-debugging candidates, not robot targets or evidence of a
+  successful grasp. The first attempt wrote results but ended with a logging
+  serialization error; a separate second replay completed normally. Inputs,
+  source hashes, assumptions, scripts and candidate PLY are under
+  `artifacts/open_rail/apple_graspgenx_model_diagnostic_20261111/`, with the
+  model-only descriptor and geometry analysis under
+  `artifacts/open_rail/omnipicker_sweep_candidate_20261111/`.
 - The WeVisOne local snapshot has 626 tensors; its weight and decoder hashes
   match the download metadata. An isolated CPU-only probe using the installed
   NVIDIA Torch 2.4 prerelease and Transformers 4.57 loaded the weights and
