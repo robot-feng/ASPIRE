@@ -160,6 +160,21 @@ the first AgiBot G1 apple grasp integration.
   does not establish real-world reachability or a calibration correction.
   The URDF segments, per-candidate distances and input hashes are in
   `artifacts/open_rail/g1_cpu_ik_root_cause_20261111/geometry_bound_report.json`.
+- Additional GraspGen-X samples on that same saved cloud yielded 32 and 128
+  candidates in two separate stochastic runs. Nine of 32 and 39 of 128 had
+  both grasp and pregrasp positions within the idealized reach sphere, which
+  is necessary but does not establish IK or collision clearance. For the
+  32-candidate set, a ten-seed model-only IK search found both poses only for
+  candidate 24; an approximate scene audit gave that candidate only 1.2 mm
+  tabletop clearance, and cuRobo's full-scene pregrasp request returned
+  `no_result`. The first four 128-candidate poses selected for relatively good
+  modeled tabletop clearance likewise returned `no_result` in full-scene
+  pregrasp planning. A finite-seed CPU search found no corresponding pregrasp
+  IK solution for those four. Scene occlusion, gripper contact, actual frames,
+  calibration and collision geometry remain unverified; these are historical
+  diagnostics, not executable targets. Results, scripts and the limitation of
+  one overwritten first-batch JSON are indexed in
+  `artifacts/open_rail/g1_grasp_diversity_20261111/`.
 - `examples/open_rail/pick_apple.py` now localizes both `apple` and `plate` from
   the same captured `Observation`. The two text-prompted WeVisOne calls are
   sequential, but both consume the exact same RGB-D and robot-state snapshot;
