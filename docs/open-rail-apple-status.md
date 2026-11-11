@@ -175,6 +175,35 @@ the first AgiBot G1 apple grasp integration.
   diagnostics, not executable targets. Results, scripts and the limitation of
   one overwritten first-batch JSON are indexed in
   `artifacts/open_rail/g1_grasp_diversity_20261111/`.
+- For the remaining 35 of the 128-sample candidates inside the idealized
+  reach sphere, finite-seed CPU IK found both pregrasp and grasp solutions for
+  nine. In a separate approximate model-based scene screen, the two without
+  non-apple point overlap had only 7.35 and 5.76 mm of modeled tabletop
+  clearance and apple points inside finger AABBs; the others had observed
+  non-apple overlap and/or extended below the extrapolated tabletop plane.
+  Neither numerical IK nor the approximate AABB screen proves or disproves a
+  safe real grasp. Per-seed and scene evidence is in
+  `artifacts/open_rail/g1_omnipicker_frame_audit_20261111/remaining128_ik_report.json`
+  and `artifacts/open_rail/g1_diverse_grasp_scene_audit128_20261111/`.
+- A full-scene, model-only planning control used targets obtained from the
+  saved right-arm state via candidate FK. The current-pose target returned a
+  preview, while the target produced by changing its first joint by 0.01 rad
+  was rejected because the returned plan would also move inactive-arm joints.
+  This reveals a limitation in constraining only the inactive end-effector pose
+  on a redundant arm; it does not establish physical tracking or safety. The
+  full observed scene was retained and no trajectory was sent. Evidence is in
+  `artifacts/open_rail/g1_grasp_diversity_20261111/planner_positive_control.json`.
+- In an isolated follow-up, a model built with the recorded candidate left-arm,
+  head and waist joints locked retained collision spheres for both arms. The
+  same 0.01 rad model-FK target produced a preview with zero left-arm deviation
+  at every waypoint. Two apple pregrasp candidates also returned previews,
+  but each involved more than 2.7 rad of modeled right-arm displacement and
+  had very little modeled tabletop clearance. These are not safe physical
+  commands. The experiment used an isolated process, not the production
+  planner path; integrating it requires binding head/waist and arm state,
+  mapping and time to the same verified observation and managing model caches.
+  Source, failed first harness and results are in
+  `artifacts/open_rail/g1_locked_arm_offline_20261111_8RBPmW/`.
 - `examples/open_rail/pick_apple.py` now localizes both `apple` and `plate` from
   the same captured `Observation`. The two text-prompted WeVisOne calls are
   sequential, but both consume the exact same RGB-D and robot-state snapshot;
@@ -287,6 +316,18 @@ ASPIRE baseline. New Open-RAIL code is kept in its sibling package.
   but found no obvious large apple-mask displacement in this view. Inputs,
   threshold sensitivity and limitations are recorded in
   `artifacts/open_rail/g1_rgbd_edge_alignment_20261111/`.
+- A separate historical episode shows right-arm movement while holding an
+  apple. At five recorded poses, the candidate camera-chain projection of a
+  model-only gripper base overlapped coarse manually drawn image regions more
+  than inverse-extrinsic and omitted-head-rotation alternatives. The overlap
+  is not a metric camera calibration: there is visible mismatch, occlusion,
+  unverified image/state timing and only one head pose. The same episode's
+  depth recording contains 418 frames with 1280×800 two-byte payloads and
+  timestamps agreeing with its depth index; historical configuration instead
+  lists 1280×720. This identifies a recording-format difference but does not
+  establish actual exposure timing, depth units or RGB registration. Offline
+  evidence is in `artifacts/open_rail/g1_historical_rgb_arm_motion_audit_20261111/`
+  and `artifacts/open_rail/g1_historical_depth_format_audit_20261111/`.
 - On 2026-11-11 a single read-only Open-RAIL capture at
   `artifacts/open_rail/live_readonly_20261111_GLY9dK/` received RGB, raw Z16
   and state. The frame shows a red apple to the right of a pink dish. Its RGB
