@@ -137,7 +137,7 @@ the first AgiBot G1 apple grasp integration.
   placement and robot motion are still not implemented or verified.
 - A read-only saved snapshot at
   `artifacts/open_rail/apple_after_calibration_20261111_lVytS3/` was segmented
-  with WeVisOne-VL using `apple` and `pink plate` prompts against the same RGB
+  with WeVisOne-VL using `apple` and `plate` prompts against the same RGB
   image. It returned one apple mask (6,734 pixels) and one plate mask (16,425
   pixels). The respective masks covered 6,383 and 16,324 nonzero raw depth
   samples. Their raw Z16 p05/median/p95 values were 559/570/590 and
